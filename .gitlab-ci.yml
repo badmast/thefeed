@@ -17,8 +17,12 @@
 #   KEYSTORE_PASSWORD
 #   KEY_ALIAS
 #   KEY_PASSWORD
-# Without these the APK falls back to a debug-signed build, same as the
-# GitHub workflow.
+# All four MUST be marked Protected AND v* tags MUST be listed under
+# Settings → Repository → Protected tags. Otherwise GitLab refuses to
+# inject Protected variables into the tag pipeline, KEYSTORE_BASE64
+# arrives empty, and the android-apk job hard-fails (intentional —
+# debug-signed APKs are never shipped because the debug key is well-known
+# and signed-update installs would break for existing users).
 #
 # Caching strategy (free-plan friendly):
 #   * Go module cache  — keyed by go.sum, shared across every Go job.
@@ -277,20 +281,26 @@ android-apk:
     - test -f build/thefeed-client-android-arm
     - cp build/thefeed-client-android-arm64 android/app/src/main/jniLibs/arm64-v8a/libthefeed.so
     - cp build/thefeed-client-android-arm   android/app/src/main/jniLibs/armeabi-v7a/libthefeed.so
-    # Decode signing keystore if provided as a CI/CD variable. KEYSTORE_BASE64
-    # can be a regular variable (base64-encoded) or a File-type variable
-    # containing the raw bytes — both paths are handled.
+    # Decode signing keystore. KEYSTORE_BASE64 can be a regular variable
+    # (base64-encoded) or a File-type variable containing the raw bytes.
+    # Required for any tag pipeline — we never ship debug-signed APKs
+    # because the debug key is well-known and updates would fail to
+    # install over a properly-signed previous release.
     - |
-      if [ -n "$KEYSTORE_BASE64" ]; then
-        if [ -f "$KEYSTORE_BASE64" ]; then
-          cp "$KEYSTORE_BASE64" android/app/keystore.jks
-        else
-          echo "$KEYSTORE_BASE64" | base64 -d > android/app/keystore.jks
-        fi
-        echo "Keystore decoded"
-      else
-        echo "No KEYSTORE_BASE64 — debug-signed APK"
+      if [ -z "$KEYSTORE_BASE64" ]; then
+        echo "ERROR: KEYSTORE_BASE64 is empty."
+        echo "  Make sure 'v*' tags are listed under Settings → Repository →"
+        echo "  Protected tags, so protected CI/CD variables flow into the"
+        echo "  tag pipeline. Required variables: KEYSTORE_BASE64,"
+        echo "  KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD."
+        exit 1
       fi
+      if [ -f "$KEYSTORE_BASE64" ]; then
+        cp "$KEYSTORE_BASE64" android/app/keystore.jks
+      else
+        echo "$KEYSTORE_BASE64" | base64 -d > android/app/keystore.jks
+      fi
+      echo "Keystore decoded"
     - cd android
     - VERSION="${CI_COMMIT_TAG:-dev}"
     - |
@@ -300,12 +310,11 @@ android-apk:
         export PATH="/opt/gradle-8.10.2/bin:$PATH"
         gradle wrapper --gradle-version 8.10.2
       fi
-    - |
-      if [ -f app/keystore.jks ]; then
-        BT=release; TASK=assembleRelease
-      else
-        BT=debug;   TASK=assembleDebug
-      fi
+    # We only reach this point with app/keystore.jks present — the
+    # KEYSTORE_BASE64 check above hard-fails otherwise. So always do a
+    # release build with the real signing key.
+    - BT=release
+    - TASK=assembleRelease
     - ./gradlew --no-daemon --build-cache $TASK
     - APK_DIR=app/build/outputs/apk/$BT
     - mkdir -p ../artifacts
