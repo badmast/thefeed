@@ -144,9 +144,8 @@ build:
   # Cache slots:
   #  1. Go module cache, shared across all Go jobs.
   #  2. Go build cache, per-job (android-arm vs android-arm64 differ).
-  #  3. Android SDK + NDK under .android-sdk/, keyed by NDK version so
-  #     bumping ANDROID_NDK_VERSION naturally invalidates and re-downloads.
-  #     This is the big saver — ~1.5GB that we skip downloading on cache hit.
+  #  3. Android NDK under .android-ndk/, keyed by NDK release tag.
+  #     Bumping ANDROID_NDK_RELEASE invalidates the cache automatically.
   cache:
     - key:
         files: [go.sum]
@@ -156,38 +155,32 @@ build:
     - key: "gobuild-$CI_JOB_NAME_SLUG"
       paths: [.cache/go-build]
       policy: pull-push
-    - key: "android-sdk-ndk26.3.11579264"
-      paths: [.android-sdk/]
+    - key: "android-ndk-${ANDROID_NDK_RELEASE}"
+      paths: [.android-ndk/]
       policy: pull-push
   variables:
     CGO_ENABLED: "1"
-    ANDROID_NDK_VERSION: "26.3.11579264"
-    # Project-local so it lives inside the cache.
-    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+    # NDK r26d == 26.3.11579264. We download the zip directly from Google's
+    # CDN instead of going through sdkmanager so the job doesn't need a JDK
+    # (Debian-trixie-based golang:1.26 dropped openjdk-17 and we'd otherwise
+    # have to bring in 200MB of Java just to install one tarball).
+    ANDROID_NDK_RELEASE: "r26d"
+    ANDROID_NDK_HOME: "$CI_PROJECT_DIR/.android-ndk"
   before_script:
-    # Only install command-line tools + NDK if they aren't already cached.
-    - apt-get update -qq
-    - apt-get install -y -qq curl unzip openjdk-17-jdk-headless
+    - apt-get update -qq && apt-get install -y -qq curl unzip
     - |
-      if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-        echo "Installing Android cmdline-tools (cache miss)…"
-        mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-        curl -sSL -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-        unzip -q /tmp/clt.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-        mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+      CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+      if [ ! -x "$CLANG" ]; then
+        echo "Downloading NDK ${ANDROID_NDK_RELEASE} (cache miss)…"
+        rm -rf "$ANDROID_NDK_HOME"
+        mkdir -p "$(dirname "$ANDROID_NDK_HOME")"
+        curl -sSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_RELEASE}-linux.zip"
+        unzip -q /tmp/ndk.zip -d "$(dirname "$ANDROID_NDK_HOME")"
+        mv "$(dirname "$ANDROID_NDK_HOME")/android-ndk-${ANDROID_NDK_RELEASE}" "$ANDROID_NDK_HOME"
+        rm /tmp/ndk.zip
       else
-        echo "Reusing cached Android cmdline-tools."
+        echo "Reusing cached NDK ${ANDROID_NDK_RELEASE}."
       fi
-    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-    - |
-      if [ ! -d "$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" ]; then
-        echo "Installing NDK ${ANDROID_NDK_VERSION} (cache miss)…"
-        yes | sdkmanager --licenses >/dev/null
-        sdkmanager "platform-tools" "ndk;${ANDROID_NDK_VERSION}" >/dev/null
-      else
-        echo "Reusing cached NDK ${ANDROID_NDK_VERSION}."
-      fi
-    - export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}"
   script:
     - mkdir -p build
     - VERSION="${CI_COMMIT_TAG:-dev}"
