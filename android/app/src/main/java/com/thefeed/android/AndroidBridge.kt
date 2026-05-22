@@ -62,7 +62,10 @@ class AndroidBridge(private val activity: Activity) {
 
     @JavascriptInterface
     fun getLang(): String {
-        return prefs.getString(PREF_LANG, "fa") ?: "fa"
+        // Empty string when never set — the first-run language modal
+        // uses this to decide whether to show. A default like "fa"
+        // would silently suppress the modal on a fresh install.
+        return prefs.getString(PREF_LANG, "") ?: ""
     }
 
     // ===== Password =====
