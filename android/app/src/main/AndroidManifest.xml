@@ -35,7 +35,20 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|density|locale|layoutDirection|fontScale">
+            <!-- configChanges keeps the activity (and its WebView) alive
+                 across rotation, keyboard show/hide, dark-mode toggles,
+                 display-zoom changes, and runtime locale switches.
+                 Without this, every rotation tore down MainActivity and
+                 the WebView came back blank — onCreate would reload
+                 http://127.0.0.1:<port>/, losing scroll position and any
+                 client-side state (open lightboxes, chat draft, scanner
+                 progress). Process death is still possible (low memory,
+                 force-stop); on the next launch the activity restarts
+                 fresh via waitForServerThenLoad — acceptable because the
+                 service pins its port to a stable range so localStorage
+                 persists. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
