@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">thefeed</string>
+    <string name="app_name">TheFeed</string>
     <string name="webview_loading">Loading local web UI...</string>
     <string name="start_service">Start</string>
     <string name="stop_service">Stop</string>
