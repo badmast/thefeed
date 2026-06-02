@@ -48,6 +48,9 @@ type Profile struct {
 	Config             Config   `json:"config"`
 	AutoUpdate         []string `json:"autoUpdate,omitempty"`
 	AutoUpdateInterval int      `json:"autoUpdateInterval,omitempty"`
+	// PinnedChannels stores the user's pinned channel names (stripped of @).
+	// Pinned channels render at the top of each section in the sidebar.
+	PinnedChannels []string `json:"pinnedChannels,omitempty"`
 }
 
 const (
@@ -397,6 +400,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/profiles/switch", s.handleProfileSwitch)
 	mux.HandleFunc("/api/auto-update", s.handleAutoUpdate)
 	mux.HandleFunc("/api/auto-update/toggle", s.handleAutoUpdateToggle)
+	mux.HandleFunc("/api/pinned-channels/toggle", s.handlePinnedChannelToggle)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/seen", s.handleSeen)
 	mux.HandleFunc("/api/version-check", s.handleVersionCheck)

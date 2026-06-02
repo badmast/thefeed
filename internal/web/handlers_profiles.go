@@ -93,6 +93,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 					// they don't get wiped on save (auto-update list etc.).
 					req.Profile.AutoUpdate = p.AutoUpdate
 					req.Profile.AutoUpdateInterval = p.AutoUpdateInterval
+					req.Profile.PinnedChannels = p.PinnedChannels
 					pl.Profiles[i] = req.Profile
 					if p.ID == pl.Active {
 						needsReinit = true
@@ -417,6 +418,91 @@ func (s *Server) handleAutoUpdateToggle(w http.ResponseWriter, r *http.Request) 
 // normaliseAutoUpdateList strips @ + whitespace, drops empties, dedupes
 // while preserving order.
 func normaliseAutoUpdateList(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		name := strings.TrimPrefix(strings.TrimSpace(raw), "@")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// handlePinnedChannelToggle flips one channel's pin membership. Body {channel}.
+// Returns {pinned, channel, channels}.
+func (s *Server) handlePinnedChannelToggle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", 400)
+		return
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(req.Channel), "@")
+	if name == "" {
+		http.Error(w, "channel required", 400)
+		return
+	}
+	s.profilesMu.Lock()
+	defer s.profilesMu.Unlock()
+	pl, err := s.loadProfilesExisting()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load: %v", err), 500)
+		return
+	}
+	if pl == nil || pl.Active == "" {
+		http.Error(w, "no active profile", 400)
+		return
+	}
+	idx := -1
+	for i, p := range pl.Profiles {
+		if p.ID == pl.Active {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		http.Error(w, "active profile not found", 400)
+		return
+	}
+	current := pl.Profiles[idx].PinnedChannels
+	pinned := false
+	hit := -1
+	for i, n := range current {
+		if strings.TrimPrefix(strings.TrimSpace(n), "@") == name {
+			hit = i
+			break
+		}
+	}
+	if hit >= 0 {
+		current = append(current[:hit], current[hit+1:]...)
+	} else {
+		current = append(current, name)
+		pinned = true
+	}
+	pl.Profiles[idx].PinnedChannels = normalisePinnedList(current)
+	if err := s.saveProfiles(pl); err != nil {
+		http.Error(w, fmt.Sprintf("save: %v", err), 500)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"ok":       true,
+		"channel":  name,
+		"pinned":   pinned,
+		"channels": pl.Profiles[idx].PinnedChannels,
+	})
+}
+
+// normalisePinnedList strips @ + whitespace, drops empties, dedupes
+// while preserving order.
+func normalisePinnedList(in []string) []string {
 	seen := make(map[string]bool, len(in))
 	out := make([]string, 0, len(in))
 	for _, raw := range in {

@@ -222,6 +222,14 @@ async function loadFontSize() {
     } else if (s.scanPromptOff === false) {
       localStorage.removeItem('thefeed_scan_prompt_off');
     }
+    // Populate pinned channels from the server response (per-profile).
+    pinnedChannels = new Set();
+    if (Array.isArray(s.pinnedChannels)) {
+      for (var pi = 0; pi < s.pinnedChannels.length; pi++) {
+        var pn = String(s.pinnedChannels[pi] || '').replace(/^@/, '').trim();
+        if (pn) pinnedChannels.add(pn);
+      }
+    }
     renderLatestVersion();
   } catch (e) { }
 }

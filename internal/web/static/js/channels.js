@@ -91,7 +91,53 @@ async function toggleAutoUpdate(name, ev) {
   } catch (e) { }
 }
 
+// UI cache of the active profile's pinned channel list (server is source of truth).
+// Populated from GET /api/settings (pinnedChannels field) during boot — no
+// separate endpoint needed.
+var pinnedChannels = new Set();
+async function togglePinChannel(name, ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  var clean = String(name || '').replace(/^@/, '').trim();
+  if (!clean) return;
+  // Optimistic flip; rollback if the server rejects.
+  if (pinnedChannels.has(clean)) pinnedChannels.delete(clean);
+  else pinnedChannels.add(clean);
+  // Force a full rebuild so sortPinned() re-orders the list immediately
+  // (the fast-path only toggles classes and skips sorting).
+  _forceChannelRebuild = true;
+  renderChannels();
+  try {
+    var r = await fetch('/api/pinned-channels/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: clean })
+    });
+    if (!r.ok) {
+      if (pinnedChannels.has(clean)) pinnedChannels.delete(clean);
+      else pinnedChannels.add(clean);
+      _forceChannelRebuild = true;
+      renderChannels();
+      return;
+    }
+    var d = await r.json();
+    pinnedChannels = new Set();
+    if (Array.isArray(d.channels)) {
+      for (var i = 0; i < d.channels.length; i++) {
+        var n = String(d.channels[i] || '').replace(/^@/, '').trim();
+        if (n) pinnedChannels.add(n);
+      }
+    }
+    _forceChannelRebuild = true;
+    renderChannels();
+    var template = d.pinned
+      ? (t('pin_on') || 'Channel @{name} pinned')
+      : (t('pin_off') || 'Channel @{name} unpinned');
+    showToast(template.replace('{name}', d.channel || clean), 3000);
+  } catch (e) { }
+}
+
 var _renderChannelsTimer = null;
+var _forceChannelRebuild = false;
 function renderChannels() {
   // Debounce: avoid rapid sequential DOM rebuilds that cause hover flicker
   if (_renderChannelsTimer) clearTimeout(_renderChannelsTimer);
@@ -107,8 +153,9 @@ function _renderChannelsNow() {
   // Fast-path: if channel count matches existing items, just update classes/badges
   var existingItems = el.querySelectorAll('.ch-item');
   if (existingItems.length === channels.length) {
-    var needsFullRebuild = false;
-    for (var ci = 0; ci < channels.length; ci++) {
+    var needsFullRebuild = _forceChannelRebuild;
+    _forceChannelRebuild = false;
+    for (var ci = 0; ci < channels.length && !needsFullRebuild; ci++) {
       var ch = channels[ci], nm = ch.Name || ch.name || 'Channel ' + (ci + 1);
       var lbl = ch.DisplayName || ch.displayName || nm;
       if (existingItems[ci].dataset.name !== nm || existingItems[ci].dataset.label !== lbl) { needsFullRebuild = true; break }
@@ -124,6 +171,11 @@ function _renderChannelsNow() {
         if (autoBtn) {
           var key = chNm.replace(/^@/, '').trim();
           autoBtn.classList.toggle('on', autoUpdateChannels.has(key));
+        }
+        var pinBtn = existingItems[ui].querySelector('.ch-pin');
+        if (pinBtn) {
+          var pinKey = chNm.replace(/^@/, '').trim();
+          pinBtn.classList.toggle('on', pinnedChannels.has(pinKey));
         }
         // Avatar diff against profilePicCache. Without this the
         // fast path skips avatar updates and SSE-driven reloads
@@ -166,6 +218,28 @@ function _renderChannelsNow() {
     else if (ct === 1) privs.push({ ch: c, idx: i });
     else pubs.push({ ch: c, idx: i });
   }
+  // Sort pinned channels to the top within each section, respecting pin order.
+  function sortPinned(items) {
+    var pinned = [], unpinned = [];
+    var pinOrderMap = new Map();
+    var idx = 0;
+    pinnedChannels.forEach(function (v) { pinOrderMap.set(v, idx++); });
+    for (var k = 0; k < items.length; k++) {
+      var ch = items[k].ch;
+      var pKey = (ch.Name || ch.name || '').replace(/^@/, '').trim();
+      if (pinOrderMap.has(pKey)) {
+        items[k]._pinIdx = pinOrderMap.get(pKey);
+        pinned.push(items[k]);
+      } else {
+        unpinned.push(items[k]);
+      }
+    }
+    pinned.sort(function(a, b) { return a._pinIdx - b._pinIdx; });
+    return pinned.concat(unpinned);
+  }
+  pubs = sortPinned(pubs);
+  xposts = sortPinned(xposts);
+  privs = sortPinned(privs);
   function section(title, items) {
     if (!items.length) return ''; var h = '';
     if (title) h += '<div class="channel-section-title">' + esc(title) + '</div>';
@@ -207,11 +281,22 @@ function _renderChannelsNow() {
       h += '<button type="button" class="ch-autoupdate' + (autoOn ? ' on' : '') + '"'
         + ' title="' + autoTitle + '" aria-label="' + autoTitle + '"'
         + ' onclick="toggleAutoUpdate(\'' + escAttr(autoKey) + '\', event)">&#x23F1;</button>';
+      var pinKey = handle.replace(/^@/, '').trim();
+      var pinOn = pinnedChannels.has(pinKey);
+      var pinTitle = esc(t('pin_channel') || 'Pin this channel');
+      // Use 📌 for pinned, and hollow pin 📍 or just simple styling for unpinned.
+      var pinGlyph = pinOn ? '&#x1F4CC;' : '&#x1F4CD;';
+      h += '<button type="button" class="ch-pin' + (pinOn ? ' on' : '') + '"'
+        + ' title="' + pinTitle + '" aria-label="' + pinTitle + '"'
+        + ' onclick="togglePinChannel(\'' + escAttr(pinKey) + '\', event)">' + pinGlyph + '</button>';
       h += '</div>';
     }
     return h;
   }
+  var scrollContainer = el.parentElement || el;
+  var oldScroll = scrollContainer.scrollTop;
   el.innerHTML = section('', pubs) + section(t('x_posts'), xposts) + section(t('private'), privs);
+  scrollContainer.scrollTop = oldScroll;
   _updateRefreshBadge();
 }
 function _updateRefreshBadge() {

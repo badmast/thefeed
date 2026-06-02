@@ -21,6 +21,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			pl = &ProfileList{}
 		}
 		qm, rl, sc, to := connectionSettings(pl)
+		// Gather pinned channels from the active profile.
+		var pinnedCh []string
+		if pl.Active != "" {
+			for _, p := range pl.Profiles {
+				if p.ID == pl.Active {
+					pinnedCh = p.PinnedChannels
+					break
+				}
+			}
+		}
+		if pinnedCh == nil {
+			pinnedCh = []string{}
+		}
 		writeJSON(w, map[string]any{
 			"fontSize":           pl.FontSize,
 			"debug":              pl.Debug,
@@ -34,6 +47,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"scatter":            sc,
 			"timeout":            to,
 			"resolverCacheShare": pl.ShareEnabled(),
+			"pinnedChannels":     pinnedCh,
 			"version":            version.Version,
 			"commit":             version.Commit,
 		})

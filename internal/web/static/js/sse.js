@@ -51,6 +51,7 @@ function connectSSE() {
     if (data === 'profiles') {
       var prevActive = activeProfileId;
       await loadProfiles();
+      await loadFontSize(); // Refetch settings to update pinnedChannels for the new profile
       if (activeProfileId !== prevActive) {
         // The active profile changed under us — drop stale local state
         // so the user doesn't see the old profile's channel/messages.

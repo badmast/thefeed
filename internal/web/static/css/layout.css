@@ -326,6 +326,48 @@
       border-color: #fff;
     }
 
+    /* Pin toggle on each channel row. */
+    .ch-pin {
+      flex: 0 0 auto;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      font-size: 16px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 0;
+      transition: background .15s, color .15s, border-color .15s;
+      opacity: .55;
+    }
+
+    .ch-item:hover .ch-pin {
+      opacity: 1;
+    }
+
+    .ch-pin.on {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+      border-color: rgba(245, 158, 11, 0.4);
+      opacity: 1;
+    }
+
+    .ch-item.active .ch-pin {
+      color: rgba(255, 255, 255, .9);
+      border-color: rgba(255, 255, 255, .35);
+    }
+
+    .ch-item.active .ch-pin.on {
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.4);
+    }
+
     .ch-badge {
       background: #fff;
       color: var(--accent);
