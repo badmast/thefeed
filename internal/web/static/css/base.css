@@ -45,6 +45,54 @@
       --safe-right: env(safe-area-inset-right);
       --safe-bottom: env(safe-area-inset-bottom);
       --safe-left: env(safe-area-inset-left);
+      /* ----- Apple-HIG design tokens (dark) ----- */
+      /* Surfaces */
+      --card-bg: #1d2b3a;        /* was undefined — used by .rb-row/.rtab */
+      --bg-elevated: #1d2b3a;    /* was undefined — elevated surfaces (telemirror) */
+      --text-secondary: #8b9eb0; /* was undefined — secondary text (media) */
+      /* Spacing — 4px base grid */
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 20px;
+      --space-6: 24px;
+      --space-8: 32px;
+      /* Corner radii */
+      --radius-xs: 4px;
+      --radius-sm: 6px;
+      --radius-md: 8px;     /* default control radius */
+      --radius-lg: 10px;
+      --radius-xl: 12px;    /* cards */
+      --radius-2xl: 16px;   /* modals */
+      --radius-pill: 999px;
+      /* Type scale (maps to Apple text styles) */
+      --text-2xs: 11px;     /* caption2 */
+      --text-xs: 12px;      /* caption */
+      --text-sm: 13px;      /* footnote */
+      --text-base: 14px;    /* subhead / app base */
+      --text-md: 15px;      /* callout */
+      --text-lg: 16px;      /* body */
+      --text-xl: 17px;      /* headline (semibold) */
+      --text-2xl: 20px;     /* title3 */
+      --text-3xl: 22px;     /* title2 */
+      /* Weights */
+      --weight-regular: 400;
+      --weight-medium: 500;
+      --weight-semibold: 600;
+      /* Motion — Apple standard ease + durations */
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --motion-fast: 120ms;
+      --motion: 200ms;
+      --motion-slow: 320ms;
+      /* Elevation */
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, .3);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, .35);
+      --shadow-lg: 0 8px 30px rgba(0, 0, 0, .5);
+      /* Hit target (HIG minimum 44pt) */
+      --hit: 44px;
+      /* Focus ring */
+      --focus-ring: 0 0 0 2px var(--bg2), 0 0 0 4px var(--accent);
     }
 
     /* Android WebView lays the page out below the system bars and reports
@@ -73,6 +121,23 @@
       --msg-in: #ffffff;
       --msg-out: #d3eafe;
       --hover: #e8eaed;
+      --card-bg: #ffffff;
+      --bg-elevated: #ffffff;
+      --text-secondary: #707579;
+      --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+      --space-5: 20px; --space-6: 24px; --space-8: 32px;
+      --radius-xs: 4px; --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px;
+      --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+      --text-2xs: 11px; --text-xs: 12px; --text-sm: 13px; --text-base: 14px;
+      --text-md: 15px; --text-lg: 16px; --text-xl: 17px; --text-2xl: 20px; --text-3xl: 22px;
+      --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600;
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --motion-fast: 120ms; --motion: 200ms; --motion-slow: 320ms;
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, .12);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, .16);
+      --shadow-lg: 0 8px 30px rgba(0, 0, 0, .22);
+      --hit: 44px;
+      --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
     }
 
     * {
