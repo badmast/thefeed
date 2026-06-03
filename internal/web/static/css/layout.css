@@ -47,13 +47,13 @@
       gap: 8px;
       padding: 7px 12px;
       border: none;
-      border-radius: 20px;
+      border-radius: var(--radius-pill);
       background: var(--surface);
       color: var(--text);
-      font-size: 13px;
+      font-size: var(--text-sm);
       font-weight: 500;
       text-align: left;
-      transition: background .15s;
+      transition: background var(--motion-fast) var(--ease);
       overflow: hidden
     }
 
@@ -67,7 +67,7 @@
       border-radius: 50%;
       background: var(--accent);
       color: #fff;
-      font-size: 11px;
+      font-size: var(--text-2xs);
       font-weight: 700;
       display: flex;
       align-items: center;
@@ -83,7 +83,7 @@
     }
 
     .profile-btn-arrow {
-      font-size: 15px;
+      font-size: var(--text-md);
       color: var(--text-dim);
       flex-shrink: 0;
       display: flex;
@@ -100,10 +100,10 @@
     .sidebar-search {
       padding: 5px 10px;
       border: none;
-      border-radius: 14px;
+      border-radius: var(--radius-pill);
       background: var(--surface);
       color: var(--text);
-      font-size: 12px;
+      font-size: var(--text-xs);
       outline: none;
       width: 100%
     }
@@ -118,7 +118,7 @@
       border: none;
       background: none;
       color: var(--text-dim);
-      font-size: 17px;
+      font-size: var(--text-xl);
       border-radius: 50%;
       display: flex;
       align-items: center;
@@ -148,15 +148,15 @@
       flex: 1 1 auto;
       padding: 5px 8px;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       background: var(--surface);
       color: var(--text-dim);
-      font-size: 11px;
+      font-size: var(--text-2xs);
       font-weight: 500;
       cursor: pointer;
       text-align: center;
       white-space: nowrap;
-      transition: background .15s, color .15s
+      transition: background var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease)
     }
 
     .sidebar-toolbar .stb:hover {
@@ -184,7 +184,7 @@
 
     .channel-section-title {
       padding: 8px 14px 4px;
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--text-dim);
       text-transform: uppercase;
       letter-spacing: .5px
@@ -221,7 +221,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 17px;
+      font-size: var(--text-xl);
       color: var(--text-dim);
       flex-shrink: 0;
       font-weight: 600;
@@ -256,7 +256,7 @@
     }
 
     .ch-name {
-      font-size: 14px;
+      font-size: var(--text-base);
       font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
@@ -264,7 +264,7 @@
     }
 
     .ch-preview {
-      font-size: 12px;
+      font-size: var(--text-xs);
       color: var(--text-dim);
       white-space: nowrap;
       overflow: hidden;
@@ -272,7 +272,7 @@
     }
 
     .ch-sub {
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--text-dim);
       white-space: nowrap;
       overflow: hidden;
@@ -300,7 +300,7 @@
       justify-content: center;
       cursor: pointer;
       padding: 0;
-      transition: background .15s, color .15s, border-color .15s;
+      transition: background var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
       opacity: .55;
     }
 
@@ -335,14 +335,14 @@
       border: 1px solid var(--border);
       background: transparent;
       color: var(--text-dim);
-      font-size: 16px;
+      font-size: var(--text-lg);
       line-height: 1;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       padding: 0;
-      transition: background .15s, color .15s, border-color .15s;
+      transition: background var(--motion-fast) var(--ease), color var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
       opacity: .55;
     }
 
@@ -373,7 +373,7 @@
       color: var(--accent);
       font-size: 10px;
       padding: 1px 6px;
-      border-radius: 10px;
+      border-radius: var(--radius-lg);
       min-width: 18px;
       text-align: center;
       flex-shrink: 0;
@@ -388,7 +388,7 @@
     .ch-type-tag {
       font-size: 9px;
       padding: 1px 5px;
-      border-radius: 3px;
+      border-radius: var(--radius-xs);
       background: rgba(192, 132, 252, .15);
       color: #c084fc;
       margin-left: 4px
@@ -465,7 +465,7 @@
     }
 
     .chat-header-name {
-      font-size: 15px;
+      font-size: var(--text-md);
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
@@ -473,7 +473,7 @@
     }
 
     .chat-header-sub {
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--text-dim)
     }
 
@@ -490,7 +490,7 @@
     }
 
     .next-fetch-info {
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--text-dim);
       cursor: help;
       line-height: 1
@@ -514,22 +514,23 @@
       flex: 1;
       padding: 6px 10px;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       background: var(--bg);
       color: var(--text);
-      font-size: 13px;
+      font-size: var(--text-sm);
       outline: none
     }
 
     .msg-search-bar input:focus {
-      border-color: var(--accent)
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(51, 144, 236, .25)
     }
 
     .msg-search-bar .search-nav {
       display: flex;
       gap: 4px;
       align-items: center;
-      font-size: 12px;
+      font-size: var(--text-xs);
       color: var(--text-dim)
     }
 
@@ -537,7 +538,7 @@
       background: none;
       border: none;
       color: var(--text-dim);
-      font-size: 16px;
+      font-size: var(--text-lg);
       cursor: pointer;
       padding: 4px
     }
@@ -568,8 +569,8 @@
       width: 80px;
       padding: 6px 8px;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       background: var(--bg);
       color: var(--text);
-      font-size: 13px
+      font-size: var(--text-sm)
     }
