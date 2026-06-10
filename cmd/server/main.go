@@ -115,6 +115,11 @@ func main() {
 	if os.Getenv("THEFEED_ALLOW_MANAGE") == "0" {
 		*allowManage = false
 	}
+	if env := os.Getenv("THEFEED_DEBUG"); env == "1" {
+		*debug = true
+	} else if env == "0" {
+		*debug = false
+	}
 	if *fetchIntervalMin == 10 {
 		if v := os.Getenv("THEFEED_FETCH_INTERVAL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -130,6 +135,13 @@ func main() {
 		if v := os.Getenv("THEFEED_MSG_LIMIT"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				*msgLimit = n
+			}
+		}
+	}
+	if *maxPadding == 32 {
+		if v := os.Getenv("THEFEED_PADDING"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				*maxPadding = n
 			}
 		}
 	}
@@ -257,11 +269,11 @@ func main() {
 		PrivateChannelsFile: *privateChannelsFile,
 		XAccountsFile:       *xAccountsFile,
 		XRSSInstances:       *xRSSInstances,
-		MaxPadding:       *maxPadding,
-		MsgLimit:         *msgLimit,
-		NoTelegram:       *noTelegram,
-		AllowManage:      *allowManage,
-		Debug:            *debug,
+		MaxPadding:          *maxPadding,
+		MsgLimit:            *msgLimit,
+		NoTelegram:          *noTelegram,
+		AllowManage:         *allowManage,
+		Debug:               *debug,
 		DNSMediaEnabled:     *dnsMediaEnabled,
 		DNSMediaMaxSize:     int64(*dnsMediaMaxSizeKB) * 1024,
 		DNSMediaCacheTTL:    *dnsMediaCacheTTLMin,
