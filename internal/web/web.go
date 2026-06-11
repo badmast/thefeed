@@ -503,6 +503,7 @@ func (s *Server) serve(ln net.Listener) error {
 	var handler http.Handler = mux
 	if s.password != "" {
 		pw := s.password
+		inner := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, pass, ok := r.BasicAuth()
 			if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(pw)) != 1 {
@@ -510,9 +511,10 @@ func (s *Server) serve(ln net.Listener) error {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			mux.ServeHTTP(w, r)
+			inner.ServeHTTP(w, r)
 		})
 	}
+	handler = sameOriginGuard(handler)
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -530,6 +532,31 @@ func (s *Server) serve(ln net.Listener) error {
 		return srv.Serve(ln)
 	}
 	return srv.ListenAndServe()
+}
+
+// sameOriginGuard blocks cross-site STATE-CHANGING requests, the CSRF/DNS-
+// rebinding vector against this localhost UI: a hostile web page the user is
+// also visiting could otherwise POST to 127.0.0.1 and drive chat/admin actions
+// (e.g. enabling a chat server, sending a message). It keys off the browser-set
+// Fetch-Metadata header, which is sent on every request and cannot be forged by
+// the calling page:
+//   - "cross-site" on an unsafe method → reject.
+//   - same-origin / same-site / none (direct navigation), or no header at all
+//     (curl, native/mobile clients, the in-app webview's own calls) → allow.
+//
+// Reads (GET/HEAD) are never blocked, so no legitimate same-origin flow breaks.
+func sameOriginGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "cross-site request blocked", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

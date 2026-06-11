@@ -146,6 +146,14 @@ const (
 	chatMaxUploadRounds = 20
 	chatMaxFinRounds    = 6
 	chatMaxRestarts     = 3
+
+	// chatMaxSessionCounter forces a re-handshake before the per-session op
+	// counter can reach the reserved counter regions (bootstrap 0x400000,
+	// response bit 0x800000) whose nonces would otherwise collide with a live
+	// request's — AES-CTR keystream reuse. The margin below 0x400000 dwarfs the
+	// most ops any single op() can issue (a max upload is ≤ a few thousand), so
+	// the proactive re-handshake never lands mid-operation.
+	chatMaxSessionCounter = 0x3F0000
 )
 
 // NewChatClient creates a chat driver bound to a fetcher and identity.
@@ -330,7 +338,9 @@ func (c *ChatClient) invalidateSession() {
 // on UnknownSender, with one clock-corrected retry on a skew BadAuth.
 func (c *ChatClient) ensureSession(ctx context.Context, info *protocol.ChatInfo) error {
 	c.mu.Lock()
-	up := c.sessUp
+	// A near-exhausted counter is treated as "no session" so we re-handshake
+	// before any op (covering multi-exchange uploads) rather than mid-stream.
+	up := c.sessUp && c.sendCounter < chatMaxSessionCounter
 	c.mu.Unlock()
 	if up {
 		return nil
@@ -481,6 +491,13 @@ func (c *ChatClient) sendQuery(ctx context.Context, qname string) ([]byte, error
 func (c *ChatClient) exchange(ctx context.Context, plaintext []byte) (status byte, body []byte, err error) {
 	c.mu.Lock()
 	if !c.sessUp || c.info == nil {
+		c.mu.Unlock()
+		return 0, nil, errChatSessionLost
+	}
+	// Hard stop: never seal at a counter that reaches the reserved regions
+	// (bootstrap/response). ensureSession re-handshakes well before this, so in
+	// practice it only fires if some path drove the counter here directly.
+	if c.sendCounter >= protocol.ChatBootstrapCounter() {
 		c.mu.Unlock()
 		return 0, nil, errChatSessionLost
 	}

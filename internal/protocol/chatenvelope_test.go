@@ -270,3 +270,34 @@ func TestSplitChunksEmpty(t *testing.T) {
 		t.Fatalf("empty split = %v, want one empty chunk", chunks)
 	}
 }
+
+func TestDecompressMessagesLimited(t *testing.T) {
+	// A deflate "bomb": a tiny stream that inflates far past the cap.
+	bomb := CompressMessages(make([]byte, 1<<20)) // 1 MiB of zeros → a few bytes
+	if bomb[0] != compressionDeflate {
+		t.Fatalf("expected deflate, got 0x%02x", bomb[0])
+	}
+	if _, err := DecompressMessagesLimited(bomb, ChatMaxPlaintextBytes); err == nil {
+		t.Fatal("over-cap decompression accepted — zip bomb not rejected")
+	}
+	// Unbounded still works (the feed path relies on this).
+	out, err := DecompressMessagesLimited(bomb, 0)
+	if err != nil || len(out) != 1<<20 {
+		t.Fatalf("unbounded decompress: len=%d err=%v", len(out), err)
+	}
+	// A normal small message round-trips under the cap.
+	msg := []byte("the quick brown fox jumps over the lazy dog")
+	got, err := DecompressMessagesLimited(CompressMessages(msg), ChatMaxPlaintextBytes)
+	if err != nil || string(got) != string(msg) {
+		t.Fatalf("round-trip: got %q err=%v", got, err)
+	}
+	// Exactly-at-cap is allowed; one byte over is not (compressionNone path).
+	atCap := append([]byte{compressionNone}, make([]byte, ChatMaxPlaintextBytes)...)
+	if _, err := DecompressMessagesLimited(atCap, ChatMaxPlaintextBytes); err != nil {
+		t.Fatalf("at-cap rejected: %v", err)
+	}
+	overCap := append([]byte{compressionNone}, make([]byte, ChatMaxPlaintextBytes+1)...)
+	if _, err := DecompressMessagesLimited(overCap, ChatMaxPlaintextBytes); err == nil {
+		t.Fatal("over-cap raw body accepted")
+	}
+}

@@ -347,3 +347,37 @@ func TestChatThreadPinAndDelete(t *testing.T) {
 		t.Fatal("invalid peer accepted")
 	}
 }
+
+func TestSameOriginGuard(t *testing.T) {
+	called := false
+	guarded := sameOriginGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	run := func(method, fetchSite string) (code int, reached bool) {
+		called = false
+		req := httptest.NewRequest(method, "/api/chat/send", nil)
+		if fetchSite != "" {
+			req.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		rec := httptest.NewRecorder()
+		guarded.ServeHTTP(rec, req)
+		return rec.Code, called
+	}
+
+	// Cross-site state-changing request is blocked before reaching the handler.
+	if code, reached := run(http.MethodPost, "cross-site"); code != http.StatusForbidden || reached {
+		t.Fatalf("cross-site POST: code=%d reached=%v, want 403/false", code, reached)
+	}
+	// Same-origin / native (no header) writes pass through.
+	for _, site := range []string{"same-origin", "same-site", "none", ""} {
+		if code, reached := run(http.MethodPost, site); code != http.StatusOK || !reached {
+			t.Fatalf("POST Sec-Fetch-Site=%q: code=%d reached=%v, want 200/true", site, code, reached)
+		}
+	}
+	// Reads are never blocked, even cross-site.
+	if code, reached := run(http.MethodGet, "cross-site"); code != http.StatusOK || !reached {
+		t.Fatalf("cross-site GET: code=%d reached=%v, want 200/true", code, reached)
+	}
+}

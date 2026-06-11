@@ -488,19 +488,62 @@
 }
 
 .chat-msg .chat-msg-meta {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
   opacity: .7;
   margin-top: 3px;
-  text-align: right
+  justify-content: flex-end
 }
 
 .chat-msg.in .chat-msg-meta {
-  text-align: left
+  justify-content: flex-start
+}
+
+/* Per-message copy button: subtle (so it doesn't shout on every bubble) but
+   always present, so it works on touch where there is no hover. */
+.chat-msg-copy {
+  background: none;
+  border: 0;
+  padding: 2px;
+  margin: -2px;
+  cursor: pointer;
+  color: inherit;
+  opacity: .55;
+  line-height: 0;
+  border-radius: 5px
+}
+
+.chat-msg-copy:hover {
+  opacity: 1
+}
+
+.chat-msg-copy svg {
+  width: 13px;
+  height: 13px
 }
 
 .chat-clearfix {
   clear: both
+}
+
+/* Day separator between messages from different days (cleared so it sits
+   between the floated bubbles, not beside them). */
+.chat-date-sep {
+  clear: both;
+  text-align: center;
+  margin: 12px 0 6px
+}
+
+.chat-date-sep span {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 10px
 }
 
 .chat-footer {

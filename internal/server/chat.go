@@ -345,6 +345,13 @@ func (c *ChatService) allocSelectorLocked() [protocol.ChatSelectorSize]byte {
 // ---- in-context ops ----
 
 func (c *ChatService) handleInContext(sess *chatSession, selector [protocol.ChatSelectorSize]byte, counter uint32, payload []byte, now time.Time) []byte {
+	// In-context request counters live below the reserved regions (bootstrap /
+	// response bit). A counter at/above bootstrap is a buggy or hostile client;
+	// reject it rather than seal a response whose nonce could collide. (A forged
+	// cell would fail the seal below anyway; this makes the invariant explicit.)
+	if counter >= protocol.ChatBootstrapCounter() {
+		return protocol.ChatSessionLostResp
+	}
 	pt, err := protocol.OpenChat(sess.ksession, selector[:], counter, payload)
 	if err != nil {
 		// Bad seal — corruption or a stale selector collision; ask to re-handshake.

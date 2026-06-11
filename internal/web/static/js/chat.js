@@ -44,6 +44,21 @@ function chatFmtTime(ts) {
   return d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 }
 
+// chatFmtDate renders a day label for the thread date separators — Jalali for
+// Persian, Gregorian otherwise, matching the feed (media.js).
+function chatFmtDate(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  var fa = (typeof lang !== 'undefined' && lang === 'fa');
+  var opts = { year: 'numeric', month: 'long', day: 'numeric' };
+  if (fa) opts.calendar = 'persian';
+  try {
+    return d.toLocaleDateString(fa ? 'fa-IR' : undefined, opts);
+  } catch (e) {
+    return d.toLocaleDateString();
+  }
+}
+
 function openMessenger() {
   document.getElementById('chatModal').classList.add('active');
   chatState.open = true;
@@ -413,6 +428,15 @@ function chatCopy(v) {
   navigator.clipboard.writeText(v).then(function () { showToast(t('copied')) }).catch(function () { });
 }
 
+// chatCopyMsg copies a bubble's text, read from the DOM (never inlined into the
+// handler) so message content with quotes/newlines can't break or inject.
+function chatCopyMsg(btn) {
+  var msg = btn.closest ? btn.closest('.chat-msg') : null;
+  if (!msg) return;
+  var txt = msg.querySelector('.chat-msg-text');
+  if (txt) chatCopy(txt.textContent);
+}
+
 async function chatShowRecovery() {
   var box = document.getElementById('chatRecoveryBox');
   if (!box) return;
@@ -723,15 +747,28 @@ async function chatRenderThread() {
   if (!msgs.length) {
     html += '<div class="chat-empty">' + esc(chatT('chat_no_messages')) + '</div>';
   }
+  var lastDate = '';
   msgs.forEach(function (m) {
+    // Day separator: insert a centered date chip whenever the day changes, so a
+    // multi-day conversation reads correctly (Jalali for fa, Gregorian for en).
+    var dateStr = chatFmtDate(m.ts);
+    if (dateStr && dateStr !== lastDate) {
+      html += '<div class="chat-date-sep"><span dir="auto">' + esc(dateStr) + '</span></div>';
+      lastDate = dateStr;
+    }
     var ticks = '';
     if (m.dir === 'out') {
       if (st.delivered >= m.seq) ticks = ' ✓✓';
       else if (st.accepted >= m.seq) ticks = ' ✓';
       else ticks = ' 🕓';
     }
-    html += '<div class="chat-msg ' + (m.dir === 'in' ? 'in' : 'out') + '" dir="auto">' + esc(m.text) +
-      '<span class="chat-msg-meta">' + chatFmtTime(m.ts) + esc(ticks) + '</span></div>' +
+    html += '<div class="chat-msg ' + (m.dir === 'in' ? 'in' : 'out') + '" dir="auto">' +
+      '<span class="chat-msg-text">' + esc(m.text) + '</span>' +
+      '<span class="chat-msg-meta">' +
+      '<button type="button" class="chat-msg-copy" title="' + escAttr(chatT('chat_copy')) +
+      '" aria-label="' + escAttr(chatT('chat_copy')) +
+      '" onclick="event.stopPropagation();chatCopyMsg(this)">' + icon('copy') + '</button>' +
+      '<span class="chat-msg-time">' + chatFmtTime(m.ts) + esc(ticks) + '</span></span></div>' +
       '<div class="chat-clearfix"></div>';
   });
   html += '</div>';

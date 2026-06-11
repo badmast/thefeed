@@ -508,19 +508,43 @@ func DecodeTitlesData(data []byte) (map[string]string, error) {
 // DecompressMessages decompresses data produced by CompressMessages.
 // Reads the 1-byte header to determine the compression type.
 func DecompressMessages(data []byte) ([]byte, error) {
+	return DecompressMessagesLimited(data, 0)
+}
+
+// DecompressMessagesLimited is DecompressMessages with a cap on the inflated
+// output (maxOut <= 0 means unbounded). A caller that decompresses data from an
+// untrusted source must pass a sane cap: deflate expands up to ~1000x, so a
+// small ciphertext can otherwise inflate into a memory-exhausting "zip bomb".
+func DecompressMessagesLimited(data []byte, maxOut int) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty compressed data")
 	}
 
 	switch data[0] {
 	case compressionNone:
-		return data[1:], nil
+		body := data[1:]
+		if maxOut > 0 && len(body) > maxOut {
+			return nil, fmt.Errorf("decompress: %d bytes over cap %d", len(body), maxOut)
+		}
+		return body, nil
 	case compressionDeflate:
 		r := flate.NewReader(bytes.NewReader(data[1:]))
 		defer r.Close()
-		out, err := io.ReadAll(r)
+		if maxOut <= 0 {
+			out, err := io.ReadAll(r)
+			if err != nil {
+				return nil, fmt.Errorf("deflate decompress: %w", err)
+			}
+			return out, nil
+		}
+		// Read one byte past the cap so an over-limit stream is detected rather
+		// than silently truncated.
+		out, err := io.ReadAll(io.LimitReader(r, int64(maxOut)+1))
 		if err != nil {
 			return nil, fmt.Errorf("deflate decompress: %w", err)
+		}
+		if len(out) > maxOut {
+			return nil, fmt.Errorf("decompress: output exceeds cap %d", maxOut)
 		}
 		return out, nil
 	default:

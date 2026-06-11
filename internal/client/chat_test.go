@@ -413,6 +413,66 @@ func TestChatClientLossyTransport(t *testing.T) {
 	}
 }
 
+// TestChatClientCounterCapRehandshakes drives the per-session op counter up to
+// the cap and verifies the next op transparently re-handshakes (resetting the
+// counter) instead of sealing into the reserved counter region — which would
+// reuse an AES-CTR nonce.
+func TestChatClientCounterCapRehandshakes(t *testing.T) {
+	ts := newChatTestServer(t, protocol.DefaultChatLimits())
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 1, "first", nil); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+
+	// Pin the live session's counter at the cap; the prior selector stays valid
+	// server-side, so only the proactive cap (not a SessionLost) can trigger the
+	// re-handshake we want to observe.
+	a.mu.Lock()
+	if !a.sessUp {
+		a.mu.Unlock()
+		t.Fatal("expected a live session after first send")
+	}
+	a.sendCounter = chatMaxSessionCounter
+	prevRef := a.sessRef
+	a.mu.Unlock()
+
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 2, "after cap", nil); err != nil {
+		t.Fatalf("send after counter cap: %v", err)
+	}
+
+	a.mu.Lock()
+	newCounter := a.sendCounter
+	newRef := a.sessRef
+	a.mu.Unlock()
+	if newCounter >= chatMaxSessionCounter {
+		t.Fatalf("counter not reset after cap: %#x", newCounter)
+	}
+	if newRef == prevRef {
+		t.Fatal("session selector unchanged — no re-handshake happened")
+	}
+
+	msgs, err := b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	var got2 bool
+	for _, m := range msgs {
+		if m.Seq == 2 && m.Text == "after cap" {
+			got2 = true
+		}
+	}
+	if !got2 {
+		t.Fatalf("post-cap message not delivered: %+v", msgs)
+	}
+}
+
 func TestChatClientFailClosed(t *testing.T) {
 	limits := protocol.DefaultChatLimits()
 	ts := newChatTestServer(t, limits)

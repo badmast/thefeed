@@ -24,6 +24,12 @@ const (
 
 	// chatRegSignContext domain-separates registration signatures.
 	chatRegSignContext = "thefeed-chat-register-v1"
+
+	// ChatMaxPlaintextBytes caps a decompressed message body. Real messages are
+	// well under MaxMsgBytes; the cap only bounds memory if a hostile peer sends
+	// a deflate bomb (a tiny ciphertext that inflates ~1000x). 64 KiB is far
+	// above any legitimate text and far below a memory-DoS.
+	ChatMaxPlaintextBytes = 64 * 1024
 )
 
 // ChatMessage is a parsed message envelope.
@@ -106,7 +112,7 @@ func (m *ChatMessage) Open(contentKey [KeySize]byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("chat: open message: %w", err)
 	}
-	body, err := DecompressMessages(inner)
+	body, err := DecompressMessagesLimited(inner, ChatMaxPlaintextBytes)
 	if err != nil {
 		return "", fmt.Errorf("chat: decompress: %w", err)
 	}
