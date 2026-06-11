@@ -35,6 +35,21 @@ func TestSerializeParseMetadata(t *testing.T) {
 	}
 }
 
+func TestMetadataFlags(t *testing.T) {
+	for _, tc := range []struct {
+		tg, chat bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		m := &Metadata{TelegramLoggedIn: tc.tg, ChatAvailable: tc.chat}
+		got, err := ParseMetadata(SerializeMetadata(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TelegramLoggedIn != tc.tg || got.ChatAvailable != tc.chat {
+			t.Fatalf("flags tg=%v chat=%v -> got tg=%v chat=%v", tc.tg, tc.chat, got.TelegramLoggedIn, got.ChatAvailable)
+		}
+	}
+}
+
 func TestSerializeParseMessages(t *testing.T) {
 	original := []Message{
 		{ID: 100, Timestamp: 1700000000, Text: "Hello world"},

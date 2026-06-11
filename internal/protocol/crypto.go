@@ -68,6 +68,30 @@ func Decrypt(key [KeySize]byte, ciphertext []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext[gcm.NonceSize():], nil)
 }
 
+// EncryptFixedNonce seals with an all-zero nonce and no transmitted nonce —
+// ONLY for single-use keys (a key that never seals two different plaintexts),
+// e.g. the chat content key, which is unique per (src,dst,seq). Output is
+// ciphertext+tag, no nonce prefix.
+func EncryptFixedNonce(key [KeySize]byte, plaintext []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nil, make([]byte, gcm.NonceSize()), plaintext, nil), nil
+}
+
+// DecryptFixedNonce reverses EncryptFixedNonce.
+func DecryptFixedNonce(key [KeySize]byte, ct []byte) ([]byte, error) {
+	gcm, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(ct) < gcm.Overhead() {
+		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(ct))
+	}
+	return gcm.Open(nil, make([]byte, gcm.NonceSize()), ct, nil)
+}
+
 // encryptQueryBlock encrypts an 8-byte query payload using a direct AES-256 block cipher.
 // The payload is expanded to one AES block (16 bytes) with 8 trailing zero bytes before
 // encryption. No nonce or auth tag needed: the 4 random bytes in the payload guarantee

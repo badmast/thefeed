@@ -148,6 +148,7 @@ func (s *Server) refreshMetadataOnly() {
 	s.mu.Lock()
 	s.channels = channels
 	s.telegramLoggedIn = meta.TelegramLoggedIn
+	s.chatAvailable = meta.ChatAvailable
 	s.nextFetch = meta.NextFetch
 	s.metaFetchedAt = time.Now()
 	s.mu.Unlock()
@@ -363,6 +364,7 @@ func (s *Server) refreshChannel(channelNum int) {
 		s.mu.Lock()
 		s.channels = channels
 		s.telegramLoggedIn = meta.TelegramLoggedIn
+		s.chatAvailable = meta.ChatAvailable
 		s.nextFetch = meta.NextFetch
 		s.metaFetchedAt = time.Now()
 		s.mu.Unlock()
@@ -448,6 +450,7 @@ func (s *Server) refreshChannel(channelNum int) {
 			s.mu.Lock()
 			s.channels = freshMeta.Channels
 			s.telegramLoggedIn = freshMeta.TelegramLoggedIn
+			s.chatAvailable = freshMeta.ChatAvailable
 			s.nextFetch = freshMeta.NextFetch
 			s.metaFetchedAt = time.Now()
 			s.mu.Unlock()
@@ -494,6 +497,7 @@ func (s *Server) refreshChannel(channelNum int) {
 			s.mu.Lock()
 			s.channels = freshMeta.Channels
 			s.telegramLoggedIn = freshMeta.TelegramLoggedIn
+			s.chatAvailable = freshMeta.ChatAvailable
 			s.nextFetch = freshMeta.NextFetch
 			s.metaFetchedAt = time.Now()
 			s.mu.Unlock()

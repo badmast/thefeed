@@ -58,6 +58,13 @@ type Feed struct {
 	// each other's writes through the read-modify-write sequence.
 	profilePicsMergeMu sync.Mutex
 
+	// chatInfoBlocks serves the chat capability payload on
+	// ChatInfoChannel. nil/empty means chat is disabled — the channel
+	// answers not-found and clients negative-cache that.
+	chatInfoBlocks [][]byte
+	// chatAvailable sets the metadata "server has chat" flag bit.
+	chatAvailable bool
+
 	// signKey is the server ed25519 key used to sign ExtraBlocks. nil
 	// disables signing (old behaviour). extraBlocks holds, per channel,
 	// the signed ExtraBlock served at block index == the channel's real
@@ -128,6 +135,7 @@ func (f *Feed) SetSigningKey(priv ed25519.PrivateKey) {
 	f.buildExtraBlockLocked(int(protocol.TitlesChannel), f.titlesBlocks)
 	f.buildExtraBlockLocked(int(protocol.RelayInfoChannel), f.relayInfoBlocks)
 	f.buildExtraBlockLocked(int(protocol.ProfilePicsChannel), f.profilePicsBlocks)
+	f.buildExtraBlockLocked(int(protocol.ChatInfoChannel), f.chatInfoBlocks)
 	for chNum, blocks := range f.blocks {
 		f.buildExtraBlockLocked(chNum, blocks)
 	}
@@ -183,6 +191,9 @@ func (f *Feed) GetBlock(channel, block int) ([]byte, error) {
 	}
 	if channel == int(protocol.ProfilePicsChannel) {
 		return f.getProfilePicsBlock(block)
+	}
+	if channel == int(protocol.ChatInfoChannel) {
+		return f.getChatInfoBlock(block)
 	}
 	// Channel sits in the binary media range — delegate to MediaCache. We
 	// drop the read lock first because MediaCache uses its own lock and we
@@ -284,6 +295,53 @@ func (f *Feed) rebuildRelayInfoBlocks() {
 	f.buildExtraBlockLocked(int(protocol.RelayInfoChannel), f.relayInfoBlocks)
 }
 
+// SetChatAvailable sets the metadata flag advertising that this server has
+// the messenger configured. Call before SetChatInfoPayload.
+func (f *Feed) SetChatAvailable(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chatAvailable == v {
+		return
+	}
+	f.chatAvailable = v
+	f.rebuildMetaBlocks()
+}
+
+// SetChatInfoPayload publishes (or clears, with empty payload) the chat
+// capability data on ChatInfoChannel. Block 0 is prefixed with a uint16
+// total-block count (same convention as titles); the channel is signed like
+// any other when a signing key is set. Call after SetSigningKey.
+func (f *Feed) SetChatInfoPayload(payload []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(payload) == 0 {
+		f.chatInfoBlocks = nil
+		delete(f.extraBlocks, int(protocol.ChatInfoChannel))
+		return
+	}
+	blocks := protocol.SplitIntoBlocks(payload)
+	prefix := []byte{byte(len(blocks) >> 8), byte(len(blocks))}
+	blocks[0] = append(prefix, blocks[0]...)
+	f.chatInfoBlocks = blocks
+	f.buildExtraBlockLocked(int(protocol.ChatInfoChannel), f.chatInfoBlocks)
+}
+
+func (f *Feed) getChatInfoBlock(block int) ([]byte, error) {
+	blocks := f.chatInfoBlocks
+	if len(blocks) == 0 {
+		// Chat disabled — clients treat not-found as "no chat" and
+		// negative-cache it.
+		return nil, fmt.Errorf("chat not enabled")
+	}
+	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(int(protocol.ChatInfoChannel), block, len(blocks)); ok {
+			return eb, nil
+		}
+		return nil, fmt.Errorf("chat-info block %d out of range (%d blocks)", block, len(blocks))
+	}
+	return blocks[block], nil
+}
+
 func (f *Feed) getVersionBlock(block int) ([]byte, error) {
 	blocks := f.versionBlocks
 	if len(blocks) == 0 {
@@ -326,6 +384,7 @@ func (f *Feed) rebuildMetaBlocks() {
 		// Marker + Timestamp are overwritten by EncodeMetadataExtended.
 		NextFetch:        f.nextFetch,
 		TelegramLoggedIn: f.telegramLoggedIn,
+		ChatAvailable:    f.chatAvailable,
 	}
 
 	for i, name := range f.channels {

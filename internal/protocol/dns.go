@@ -121,7 +121,8 @@ func ChannelEligibleForSharedCache(channel uint16) bool {
 	switch channel {
 	case MetadataChannel,
 		SendChannel, AdminChannel,
-		UpstreamInitChannel, UpstreamDataChannel:
+		UpstreamInitChannel, UpstreamDataChannel,
+		ChatChannel:
 		return false
 	}
 	return true

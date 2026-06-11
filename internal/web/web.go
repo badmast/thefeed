@@ -25,7 +25,7 @@ var staticFS embed.FS
 
 // Config holds the client configuration saved in the data directory.
 type Config struct {
-	Domain    string   `json:"domain"`
+	Domain string `json:"domain"`
 	// ExtraDomains are additional sub-domains the server also answers feed
 	// queries on; the client spreads block fetches across the main domain +
 	// these (main stays canonical for relay paths). From the d= URI field.
@@ -35,9 +35,9 @@ type Config struct {
 	// ServerKey is the pinned server signing public key (base64url, the sk=
 	// field of a thefeed:// URI). When set, the client verifies feed content
 	// against the server's signed ExtraBlocks. Empty = unverified (old config).
-	ServerKey string   `json:"serverKey,omitempty"`
-	QueryMode string   `json:"queryMode"`
-	RateLimit float64  `json:"rateLimit"`
+	ServerKey string  `json:"serverKey,omitempty"`
+	QueryMode string  `json:"queryMode"`
+	RateLimit float64 `json:"rateLimit"`
 	// Timeout is the per-query DNS timeout in seconds (0 = default 15 s).
 	// Also used as the resolver health-check probe timeout.
 	Timeout float64 `json:"timeout,omitempty"`
@@ -228,6 +228,7 @@ type Server struct {
 	channels         []protocol.ChannelInfo
 	messages         map[int][]protocol.Message
 	telegramLoggedIn bool
+	chatAvailable    bool // server advertises the messenger (metadata flag bit)
 	nextFetch        uint32
 	latestVersion    string
 	lastMsgIDs       map[int]uint32 // last seen message IDs per channel
@@ -298,6 +299,9 @@ type Server struct {
 
 	// Optional per-channel profile pictures cache.
 	profilePics *profilePicsHub
+
+	// chat is the standalone messenger hub (identity, threads, poll loop).
+	chat *chatHub
 }
 
 // New creates a new web server.
@@ -342,6 +346,7 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 	s.telemirror = newTelemirrorHub(dataDir, func(username string) {
 		s.broadcast("event: update\ndata: \"telemirror:" + username + "\"\n\n")
 	})
+	s.chat = newChatHub(s, dataDir)
 
 	if mediaCache != nil {
 		go mediaCache.Cleanup()
@@ -446,6 +451,18 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/telemirror/img", s.telemirror.handleImg)
 	mux.HandleFunc("/api/telemirror/avatar/", s.telemirror.handleAvatar)
 	mux.HandleFunc("/api/telemirror/older/", s.telemirror.handleOlder)
+	// Chat messenger endpoints — see handlers_chat.go.
+	mux.HandleFunc("/api/chat/info", s.handleChatInfo)
+	mux.HandleFunc("/api/chat/availability", s.handleChatAvailability)
+	mux.HandleFunc("/api/chat/enable", s.handleChatEnable)
+	mux.HandleFunc("/api/chat/seed", s.handleChatSeed)
+	mux.HandleFunc("/api/chat/contacts", s.handleChatContacts)
+	mux.HandleFunc("/api/chat/threads", s.handleChatThreads)
+	mux.HandleFunc("/api/chat/thread", s.handleChatThread)
+	mux.HandleFunc("/api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("/api/chat/send", s.handleChatSend)
+	mux.HandleFunc("/api/chat/poll", s.handleChatPoll)
+	mux.HandleFunc("/api/chat/peer-status", s.handleChatPeerStatus)
 	// Profile-pics cache + control endpoints.
 	mux.HandleFunc("/api/profile-pics/", s.profilePics.handleProfilePic)
 	mux.HandleFunc("/api/profile-pics", s.handleProfilePicsList)
@@ -659,5 +676,63 @@ func (s *Server) initFetcher() error {
 	// Goroutine dies with fetcherCtx, so a profile switch / config change
 	// stops it cleanly.
 	go s.runAutoUpdateLoop(ctx)
+
+	// Rebuild the chat hub's per-server clients from the current profiles; its
+	// poll loop also dies with fetcherCtx.
+	if s.chat != nil {
+		s.chat.reset(ctx)
+	}
 	return nil
+}
+
+// chatResolvers returns a resolver list for building chat fetchers: the active
+// fetcher's healthy resolvers, falling back to the shared bank.
+func (s *Server) chatResolvers() []string {
+	s.mu.RLock()
+	f := s.fetcher
+	s.mu.RUnlock()
+	if f != nil {
+		if rs := f.Resolvers(); len(rs) > 0 {
+			return rs
+		}
+	}
+	if pl, err := s.loadProfiles(); err == nil && len(pl.ResolverBank) > 0 {
+		return pl.ResolverBank
+	}
+	return nil
+}
+
+// buildChatFetcher creates a lightweight Fetcher for a profile's server, used
+// only for chat (no health scanner — it reuses the shared resolver list). Its
+// background goroutines die with ctx.
+func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Context) (*client.Fetcher, error) {
+	f, err := client.NewFetcher(cfg.Domain, cfg.Key, resolvers)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.ExtraDomains) > 0 {
+		f.SetDomains(cfg.ExtraDomains)
+	}
+	if cfg.ServerKey != "" {
+		if err := f.SetServerPublicKey(cfg.ServerKey); err != nil {
+			return nil, fmt.Errorf("server key: %w", err)
+		}
+	}
+	f.SetActiveResolvers(resolvers)
+	f.SetNoiseDisabled(true) // the main feed fetcher already emits cover traffic
+	pl, _ := s.loadProfiles()
+	qm, rl, sc, to := connectionSettings(pl)
+	if qm == "double" {
+		f.SetQueryMode(protocol.QueryMultiLabel)
+	}
+	if rl > 0 {
+		f.SetRateLimit(rl)
+	}
+	if sc > 1 {
+		f.SetScatter(sc)
+	}
+	f.SetTimeout(time.Duration(to * float64(time.Second)))
+	f.SetLogFunc(func(msg string) { s.addLog(msg) })
+	f.Start(ctx)
+	return f, nil
 }

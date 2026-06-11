@@ -412,6 +412,35 @@ setup_config() {
         done
     fi
 
+    # Chat messenger: a standalone, end-to-end-encrypted messenger served on
+    # its own dedicated sub-domain(s) — never on the feed domains. Stored
+    # comma-separated in THEFEED_CHAT_DOMAINS; empty = messenger disabled.
+    local cur_chat_domains=""
+    $is_update && cur_chat_domains=$(env_get THEFEED_CHAT_DOMAINS)
+    local chat_domains="$cur_chat_domains"
+    local do_collect_cd=false
+    echo ""
+    if [[ -n "$cur_chat_domains" ]]; then
+        echo -e "${yellow}Messenger domains: ${cur_chat_domains}${plain}"
+        read -rp "Change messenger domains? [y/N]: " change_cd
+        [[ "$change_cd" == "y" || "$change_cd" == "Y" ]] && do_collect_cd=true
+    else
+        read -rp "Enable the messenger? It needs dedicated sub-domain(s). [y/N]: " add_cd
+        [[ "$add_cd" == "y" || "$add_cd" == "Y" ]] && do_collect_cd=true
+    fi
+    if $do_collect_cd; then
+        echo -e "${yellow}Enter each messenger sub-domain (must differ from the feed domains; empty line to finish):${plain}"
+        chat_domains=""
+        while true; do
+            read -rp "  Domain: " cdom
+            cdom="${cdom//[[:space:]]/}"
+            [[ -z "$cdom" ]] && break
+            if [[ "$cdom" == "$domain" ]]; then echo -e "  ${red}Must differ from the main feed domain${plain}"; continue; fi
+            if [[ -n "$chat_domains" ]]; then chat_domains="${chat_domains},${cdom}"; else chat_domains="$cdom"; fi
+            echo -e "  ${green}Added ${cdom}${plain}"
+        done
+    fi
+
     local passkey=""
     while true; do
         if [[ -n "$cur_key" ]]; then
@@ -582,6 +611,7 @@ setup_config() {
         cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
 THEFEED_EXTRA_DOMAINS=${extra_domains}
+THEFEED_CHAT_DOMAINS=${chat_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
@@ -658,6 +688,7 @@ ENVEOF
     cat > "$DATA_DIR/thefeed.env" <<ENVEOF
 THEFEED_DOMAIN=${domain}
 THEFEED_EXTRA_DOMAINS=${extra_domains}
+THEFEED_CHAT_DOMAINS=${chat_domains}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}

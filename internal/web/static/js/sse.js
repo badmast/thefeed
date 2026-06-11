@@ -11,6 +11,11 @@ function connectSSE() {
     var key; try { key = JSON.parse(e.data) } catch (x) { key = e.data }
     if (key && typeof showToast === 'function') showToast(t(key));
   });
+  // Chat messenger events (inbox arrivals, send/receive progress).
+  eventSource.addEventListener('chat', function (e) {
+    var data; try { data = JSON.parse(e.data) } catch (x) { return }
+    if (typeof chatOnSSE === 'function') chatOnSSE(data);
+  });
   eventSource.addEventListener('update', async function (e) {
     refreshResolversBadge();
     var data; try { data = JSON.parse(e.data) } catch (x) { data = e.data }

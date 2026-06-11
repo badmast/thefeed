@@ -19,6 +19,8 @@ function addLogLine(line) {
   div.className = 'log-line ' + cls; div.textContent = line;
   el.appendChild(div); el.scrollTop = el.scrollHeight;
   while (el.children.length > 200) el.removeChild(el.firstChild);
+  // Mirror into the in-chat log overlay if it's open (it's above the modal).
+  if (typeof chatLogLive === 'function') chatLogLive(line, cls);
 }
 
 function updateServerFetchDisplay(line) {

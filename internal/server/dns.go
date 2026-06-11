@@ -41,8 +41,14 @@ type DNSServer struct {
 	sessionsMu sync.Mutex
 	sessions   map[uint16]*uploadSession
 
-	reportCh chan reportEvent
-	debug    bool
+	// chat (optional) serves the standalone messenger on dedicated
+	// sub-domains; chatDomains never overlap the feed domains.
+	chat        *ChatService
+	chatDomains []string
+
+	reportCh   chan reportEvent
+	reportFile *reportFile // optional rotating JSONL sink for the report TUI
+	debug      bool
 }
 
 type channelFetchStats struct {
@@ -54,6 +60,7 @@ type reportEvent struct {
 	resolver string
 	domain   string // which configured domain the query arrived on
 	invalid  bool   // GetBlock failed for this query
+	chat     bool   // query landed on a chat sub-domain
 }
 
 type hourlyFetchReport struct {
@@ -62,6 +69,7 @@ type hourlyFetchReport struct {
 	metadataQueries int64
 	versionQueries  int64
 	mediaQueries    int64 // queries that landed in the media-blob channel range
+	chatQueries     int64 // queries that landed on a chat sub-domain
 	invalidQueries  int64 // GetBlock returned an error (unknown ch / blk OOR)
 	perChannel      map[uint16]*channelFetchStats
 	perResolver     map[string]int64
@@ -128,6 +136,56 @@ func (s *DNSServer) SetExtraDomains(extra []string) {
 	}
 }
 
+// SetReportFile enables appending each hourly report as a JSON line to a
+// rotating file (the canonical source for the `--report` dashboard). Empty path
+// disables it. Call before ListenAndServe.
+func (s *DNSServer) SetReportFile(path string) error {
+	rf, err := openReportFile(path)
+	if err != nil {
+		return err
+	}
+	s.reportFile = rf
+	return nil
+}
+
+// SetChatService attaches the chat handler on its dedicated sub-domains.
+// Chat domains must not equal any feed domain (nesting under one is fine —
+// longest-suffix matching routes them correctly). Call before ListenAndServe.
+func (s *DNSServer) SetChatService(chat *ChatService) error {
+	for _, cd := range chat.Domains() {
+		cd = strings.TrimSuffix(strings.TrimSpace(cd), ".")
+		if cd == "" {
+			continue
+		}
+		for _, fd := range s.domains {
+			if strings.EqualFold(cd, fd) {
+				return fmt.Errorf("chat domain %q conflicts with feed domain %q", cd, fd)
+			}
+		}
+		for _, existing := range s.chatDomains {
+			if strings.EqualFold(cd, existing) {
+				return fmt.Errorf("duplicate chat domain %q", cd)
+			}
+		}
+		s.chatDomains = append(s.chatDomains, cd)
+	}
+	if len(s.chatDomains) == 0 {
+		return fmt.Errorf("no usable chat domains")
+	}
+	s.chat = chat
+	return nil
+}
+
+// isChatDomain reports whether domain is one of the chat sub-domains.
+func (s *DNSServer) isChatDomain(domain string) bool {
+	for _, d := range s.chatDomains {
+		if strings.EqualFold(d, domain) {
+			return true
+		}
+	}
+	return false
+}
+
 // matchDomain returns the configured domain that qname belongs to, choosing
 // the longest suffix match so a sub-domain that nests under another is handled
 // correctly. Returns false when qname matches none of the configured domains.
@@ -135,6 +193,14 @@ func (s *DNSServer) matchDomain(qname string) (string, bool) {
 	name := strings.ToLower(strings.TrimSuffix(qname, "."))
 	matched := ""
 	for _, d := range s.domains {
+		dl := strings.ToLower(d)
+		if name == dl || strings.HasSuffix(name, "."+dl) {
+			if len(d) > len(matched) {
+				matched = d
+			}
+		}
+	}
+	for _, d := range s.chatDomains {
 		dl := strings.ToLower(d)
 		if name == dl || strings.HasSuffix(name, "."+dl) {
 			if len(d) > len(matched) {
@@ -172,6 +238,9 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 	for _, d := range s.domains {
 		mux.HandleFunc(d+".", s.handleQuery)
 	}
+	for _, d := range s.chatDomains {
+		mux.HandleFunc(d+".", s.handleQuery)
+	}
 
 	server := &dns.Server{
 		Addr:    s.listenAddr,
@@ -185,10 +254,25 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 		server.Shutdown()
 	}()
 
-	go s.runHourlyReports(ctx)
+	// Run the hourly reporter on a child context so we can wait for its final
+	// flush before closing the report file — otherwise the final report races
+	// reportFile.Close() (and process exit) and is lost on shutdown.
+	reportCtx, cancelReport := context.WithCancel(ctx)
+	reportsDone := make(chan struct{})
+	go func() {
+		s.runHourlyReports(reportCtx)
+		close(reportsDone)
+	}()
 
 	log.Printf("[dns] listening on %s (domains: %s)", s.listenAddr, strings.Join(s.domains, ", "))
-	return server.ListenAndServe()
+	err := server.ListenAndServe()
+
+	// Server has stopped (clean shutdown or bind failure). Ensure the reporter
+	// exits, wait for its final flush to hit disk, then close the file.
+	cancelReport()
+	<-reportsDone
+	s.reportFile.Close()
+	return err
 }
 
 func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
@@ -217,10 +301,30 @@ func (s *DNSServer) handleQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	// Chat domains serve only chat. Chat queries are whitened end-to-end (no
+	// feed-style ECB channel header), so they are dispatched by domain and
+	// decoded with the chat codec — never run through DecodeQuery.
+	if s.isChatDomain(domain) {
+		if s.chat == nil {
+			m.Rcode = dns.RcodeNameError
+			w.WriteMsg(m)
+			return
+		}
+		s.handleChatQuery(w, m, q, domain)
+		return
+	}
+
 	channel, block, err := protocol.DecodeQuery(s.queryKey, q.Name, domain)
 	if err != nil {
 		log.Printf("[dns] decode query: %v", err)
 		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+
+	// Feed domains never serve chat.
+	if channel == protocol.ChatChannel {
+		m.Rcode = dns.RcodeRefused
 		w.WriteMsg(m)
 		return
 	}
@@ -325,6 +429,27 @@ func (s *DNSServer) writeEncodedResponse(w dns.ResponseWriter, m *dns.Msg, name 
 		Txt: splitTXT(encoded),
 	})
 	w.WriteMsg(m)
+}
+
+func (s *DNSServer) handleChatQuery(w dns.ResponseWriter, m *dns.Msg, q dns.Question, domain string) {
+	selector, counter, payload, err := protocol.DecodeChatCell(s.queryKey, q.Name, domain)
+	if err != nil {
+		if s.debug {
+			log.Printf("[chat] decode cell: %v", err)
+		}
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+	select {
+	case s.reportCh <- reportEvent{chat: true, resolver: resolverHost(w.RemoteAddr()), domain: domain}:
+	default:
+	}
+	if s.debug {
+		log.Printf("[chat] cell sel=%x ctr=%d dom=%s name=%s from=%s", selector, counter, domain, q.Name, resolverHost(w.RemoteAddr()))
+	}
+	resp := s.chat.HandleCell(selector, counter, payload, domain, time.Now())
+	s.writeEncodedResponse(w, m, q.Name, resp)
 }
 
 func (s *DNSServer) cleanupExpiredSessions(now time.Time) {
@@ -771,6 +896,10 @@ func recordReportQuery(rep *hourlyFetchReport, event reportEvent) {
 	if event.domain != "" {
 		rep.perDomain[event.domain]++
 	}
+	if event.chat {
+		rep.chatQueries++
+		return
+	}
 	channel := event.channel
 	if channel == protocol.MetadataChannel {
 		rep.metadataQueries++
@@ -877,6 +1006,7 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 		"totalMetadataQueries": rep.metadataQueries,
 		"totalVersionQueries":  rep.versionQueries,
 		"totalMediaQueries":    rep.mediaQueries,
+		"totalChatQueries":     rep.chatQueries,
 		"totalInvalidQueries":  rep.invalidQueries,
 		"channels":             entries,
 		"topResolvers":         resolvers,
@@ -886,10 +1016,16 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 	if mediaCache := s.feed.MediaCache(); mediaCache != nil {
 		payload["mediaCache"] = mediaCache.Stats()
 	}
+	if s.chat != nil {
+		payload["chat"] = s.chat.StatsSnapshot()
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("[dns_hourly] marshal error: %v", err)
 		return
 	}
 	log.Printf("[dns_hourly] %s", string(b))
+	if err := s.reportFile.Append(b); err != nil {
+		log.Printf("[dns_hourly] write report file: %v", err)
+	}
 }

@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="/static/css/layout.css">
   <link rel="stylesheet" href="/static/css/messages.css">
   <link rel="stylesheet" href="/static/css/telemirror.css">
+  <link rel="stylesheet" href="/static/css/chat.css">
   <link rel="stylesheet" href="/static/css/media.css">
   <link rel="stylesheet" href="/static/css/components.css">
   <link rel="stylesheet" href="/static/css/responsive.css">
@@ -115,6 +116,10 @@
             data-i18n-title="telemirror_btn_title"><span data-i18n="telemirror_btn">Browse channels</span><span
               class="tm-sidebar-btn-ext" aria-hidden="true" data-icon="external"></span></button>
           <!-- END telemirror -->
+          <!-- BEGIN chat -->
+          <button class="stb" id="chatSidebarBtn" onclick="openMessenger()"><span data-icon="messenger"></span> <span
+              data-i18n="chat_btn">Messenger</span><span class="chat-sidebar-badge" id="chatSidebarBadge">0</span></button>
+          <!-- END chat -->
         </div>
         <input class="sidebar-search" id="channelSearch" type="text" data-i18n-ph="search" placeholder="Search..."
           oninput="filterChannels()">
@@ -264,6 +269,10 @@
 
   <!-- TOAST -->
   <div id="toast"></div>
+
+  <!-- BEGIN chat -->
+  <div id="chatModal" class="chat-modal"></div>
+  <!-- END chat -->
 
   <!-- BEGIN telemirror -->
   <div id="telemirrorModal" class="tm-modal">
@@ -923,6 +932,9 @@
   <!-- BEGIN telemirror -->
   <script src="/static/js/telemirror.js"></script>
   <!-- END telemirror -->
+  <!-- BEGIN chat -->
+  <script src="/static/js/chat.js"></script>
+  <!-- END chat -->
 </body>
 
 </html>

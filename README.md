@@ -58,6 +58,7 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
   - Future relays slot in alongside without breaking older clients
 - Random padding on responses (anti-DPI)
 - **Multi-domain** (`--extra-domains` / `THEFEED_EXTRA_DOMAINS`): the server answers feed queries on a main domain plus any number of extra sub-domains, and clients spread block fetches across all of them (load distribution + resilience if one domain is filtered). The main domain stays canonical for relay paths. The import URI carries the extras in the `d=` field.
+- **Messenger** (`--chat-domains` / `THEFEED_CHAT_DOMAINS`): optional store-and-forward messenger between users of the same server, served on dedicated sub-domain(s) — see [Messenger](#messenger)
 - Session persistence — login once, run forever
 - No-Telegram mode (`--no-telegram`) — reads public channels without credentials
 - All data stored in a single directory
@@ -70,6 +71,7 @@ Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
 - **Resolver scoring**: per-resolver success-rate + latency scoreboard with persistent scores; healthier resolvers are preferred. Low-scoring entries can be pruned
 - **Scatter mode**: fans out the same DNS request to multiple resolvers and uses the fastest response (default: 2 concurrent)
 - **Relay-aware media downloads** — picks the fast relay when the manifest advertises one, retries on transient failure, asks before falling back to the slow DNS path. Hash + size verified on every download
+- **Messenger**: short end-to-end-encrypted messages between users over pure DNS — delivery ticks (✓/✓✓), send/receive progress, quota display, local-only contact book
 - Send messages to channels and private chats (requires server `--allow-manage` + Telegram login)
 - Channel management (add/remove channels remotely via admin commands when `--allow-manage` is enabled)
 - **Per-channel auto-update**: pin specific channels for periodic background refresh, persisted per profile
@@ -126,6 +128,38 @@ Server flags / env vars:
 | `--github-relay-ttl`          | `THEFEED_GITHUB_RELAY_TTL_MIN`       | `600` (min) | orphans pruned next refresh cycle  |
 
 The hourly DNS report includes `totalMediaQueries` and a `mediaCache` block (entries, bytes, hits, misses, evictions).
+
+## Messenger
+
+An optional, standalone store-and-forward messenger between users of the same server (it does not touch Telegram). Enable it by giving the server one or more dedicated sub-domains, distinct from the feed domains:
+
+```bash
+thefeed-server ... --chat-domains c.example.com
+# or: THEFEED_CHAT_DOMAINS=c.example.com
+```
+
+- **End-to-end encrypted**: only the two users can read a message — the server stores opaque blobs and verifies senders without reading anything. Contact names never leave the device.
+- **Identity**: the client generates a recovery code locally; your address is 20 characters derived from it. Share the address out-of-band to be reachable; the same recovery code works on any server.
+- **Fail-closed security**: clients enable chat only when the profile pins the server key (`sk=`) and the server's chat capability data passes signature verification. A signed bit in the feed metadata advertises that a server has chat, so a client *without* the key can tell you "this server has a messenger — re-import the config with its key" instead of failing silently, and clients on chatless servers never waste a probe.
+- **Turn it off without removing domains**: `--chat-enabled=false` (or `THEFEED_CHAT_ENABLED=0`) keeps the domains configured but advertises chat as disabled; clients show "messenger disabled by this server".
+- **Abuse limits**, advertised to clients automatically: `--chat-send-per-hour` (30), `--chat-inbox-cap` (50), `--chat-per-pair-cap` (10), `--chat-max-msg-bytes` (500). Undelivered messages expire after `--chat-ttl-hours` (72).
+- **Accounts are kept by default** (`--chat-account-ttl-days 0`) so reports stay accurate; set a day count to reclaim idle accounts on a busy server. `--chat-max-accounts` (0 = unlimited) caps total accounts.
+- **Durability vs throughput** (`--chat-sync-seconds`, default 1): the message store is flushed to disk every N seconds, so a crash may lose up to ~N seconds of just-received messages (acceptable — chat is end-to-end encrypted and senders resend). Set `0` to fsync on every message for strict durability at lower throughput.
+- In the client UI open **Messenger** from the sidebar. ✓ = stored on the server, ✓✓ = picked up by the recipient. Matching safety emojis on both devices confirm the conversation is secure.
+
+The hourly DNS report includes `totalChatQueries` and a `chat` block (accounts, messages, registrations, sessions).
+
+### Operator report (TUI)
+
+The server appends each hourly report as one JSON line to `<data-dir>/dns_hourly.jsonl` (size-rotated, a few backups kept). The server binary itself renders a terminal dashboard from that file with `--report` — it serves nothing on the network, just reads the data dir:
+
+```bash
+thefeed-server --report                       # reads ./data/dns_hourly.jsonl + ./data/chat.db
+thefeed-server --data-dir /srv/thefeed --report
+thefeed-server --report --report-refresh 5s   # live, redraw every 5s
+```
+
+It shows total/channel-fetch/metadata/media/chat queries, per-channel averages with bar charts, per-domain totals, a per-report sparkline, queries-per-hour-of-day, and the chat stats (including a live account count from `chat.db`) — the same aggregations as `scripts/thefeed_log_report.py`, drawn in the terminal.
 
 ## Donate:
 

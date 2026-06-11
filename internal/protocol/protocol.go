@@ -103,7 +103,11 @@ type Metadata struct {
 	Timestamp        uint32
 	NextFetch        uint32 // unix timestamp of next server-side fetch (0 = unknown)
 	TelegramLoggedIn bool   // true if server has an active Telegram session
-	Channels         []ChannelInfo
+	// ChatAvailable advertises that this server has the messenger configured
+	// (flags bit 0x02). Lets clients skip the ChatInfo probe on chatless
+	// servers and tell apart "no chat" from "chat, but you lack the key".
+	ChatAvailable bool
+	Channels      []ChannelInfo
 }
 
 // ChannelInfo describes a single feed channel.
@@ -160,6 +164,9 @@ func SerializeMetadata(m *Metadata) []byte {
 	var flags byte
 	if m.TelegramLoggedIn {
 		flags |= 0x01
+	}
+	if m.ChatAvailable {
+		flags |= 0x02
 	}
 	buf[off] = flags
 	off++
@@ -221,6 +228,7 @@ func ParseMetadata(data []byte) (*Metadata, error) {
 	flags := data[off]
 	off++
 	m.TelegramLoggedIn = flags&0x01 != 0
+	m.ChatAvailable = flags&0x02 != 0
 
 	count := binary.BigEndian.Uint16(data[off:])
 	off += 2

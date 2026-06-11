@@ -75,6 +75,15 @@ func (s *Server) broadcast(event string) {
 	}
 }
 
+// hasUIClients reports whether at least one UI (SSE) connection is open. The
+// chat background loop polls more often while a UI is watching so incoming
+// messages surface quickly even when the messenger view itself is closed.
+func (s *Server) hasUIClients() bool {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	return len(s.clients) > 0
+}
+
 func (s *Server) addLog(msg string) {
 	ts := time.Now().Format("15:04:05")
 	line := fmt.Sprintf("%s %s", ts, msg)

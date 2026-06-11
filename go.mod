@@ -6,6 +6,7 @@ require (
 	github.com/gotd/td v0.142.0
 	github.com/miekg/dns v1.1.72
 	github.com/refraction-networking/utls v1.6.7
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.50.0
 	golang.org/x/mobile v0.0.0-20260410095206-2cfb76559b7b
 	golang.org/x/net v0.53.0

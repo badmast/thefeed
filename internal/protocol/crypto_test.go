@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestEncryptFixedNonceRoundTrip(t *testing.T) {
+	var k [KeySize]byte
+	k[2] = 1
+	pt := []byte("single-use content")
+	ct, err := EncryptFixedNonce(k, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ct) != len(pt)+16 { // no transmitted nonce, full GCM tag
+		t.Fatalf("ct len = %d", len(ct))
+	}
+	got, err := DecryptFixedNonce(k, ct)
+	if err != nil || string(got) != string(pt) {
+		t.Fatalf("decrypt: %v %q", err, got)
+	}
+	bad := append([]byte(nil), ct...)
+	bad[0] ^= 1
+	if _, err := DecryptFixedNonce(k, bad); err == nil {
+		t.Fatal("tamper accepted")
+	}
+}
+
 func TestDeriveKeys(t *testing.T) {
 	qk1, rk1, err := DeriveKeys("test-passphrase")
 	if err != nil {

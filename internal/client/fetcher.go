@@ -80,8 +80,9 @@ type Fetcher struct {
 	rateQPS float64
 	rateCh  chan struct{}
 
-	debug   bool
-	logFunc LogFunc
+	debug         bool
+	noiseDisabled bool // suppress the decoy-DNS noise loop (per-profile chat fetchers)
+	logFunc       LogFunc
 
 	// Resolver scoring: per-resolver success/failure counters and latency.
 	stats sync.Map // string (resolver:port) -> *resolverStat
@@ -515,6 +516,10 @@ func (f *Fetcher) AllResolvers() []string {
 	return result
 }
 
+// QueryMode returns the configured query encoding (single base32 label or the
+// feed's multi-label hex). Chat cells honor it so they blend with feed traffic.
+func (f *Fetcher) QueryMode() protocol.QueryEncoding { return f.queryMode }
+
 // Resolvers returns the currently active (healthy) resolver list.
 func (f *Fetcher) Resolvers() []string {
 	f.mu.RLock()
@@ -723,15 +728,24 @@ func (f *Fetcher) scatterQuery(ctx context.Context, resolvers []string, qname st
 	return nil, lastErr
 }
 
-// Start launches background goroutines (rate limiter and noise generator).
-// ctx controls their lifetime — cancel it to cleanly stop them.
-// Call once per fetcher configuration; creating a new fetcher replaces the old one.
+// SetNoiseDisabled suppresses the decoy-DNS noise generator for this fetcher.
+// Used by the per-profile chat fetchers, which piggyback on the main feed
+// fetcher's cover traffic — running one noise loop per profile would multiply
+// background DNS for no benefit. Call before Start.
+func (f *Fetcher) SetNoiseDisabled(v bool) { f.noiseDisabled = v }
+
+// Start launches background goroutines (rate limiter and, unless disabled, the
+// noise generator). ctx controls their lifetime — cancel it to cleanly stop
+// them. Call once per fetcher configuration; creating a new fetcher replaces
+// the old one.
 func (f *Fetcher) Start(ctx context.Context) {
 	if f.rateQPS > 0 {
 		f.log("fetcher started: %d configured resolvers, rate=%.1f q/s, scatter=%d", len(f.allResolvers), f.rateQPS, f.scatter)
 		f.rateCh = make(chan struct{}, 1)
 		go f.runRateLimiter(ctx)
-		go f.runNoise(ctx)
+		if !f.noiseDisabled {
+			go f.runNoise(ctx)
+		}
 	}
 }
 
@@ -836,9 +850,15 @@ func (f *Fetcher) rateWait(ctx context.Context) error {
 
 // FetchBlock fetches a single encrypted block from the given channel.
 // It enqueues through the rate limiter and respects ctx cancellation.
-// On transient failure it retries up to maxAttempts times with a short back-off.
+// On transient failure it retries up to 20 times with a short back-off.
 func (f *Fetcher) FetchBlock(ctx context.Context, channel, block uint16) ([]byte, error) {
-	const maxAttempts = 20
+	return f.fetchBlockAttempts(ctx, channel, block, 20)
+}
+
+// fetchBlockAttempts is FetchBlock with a caller-chosen retry budget — used
+// for probe fetches (e.g. chat capability discovery) where a missing channel
+// is an expected answer, not a transient failure.
+func (f *Fetcher) fetchBlockAttempts(ctx context.Context, channel, block uint16, maxAttempts int) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {

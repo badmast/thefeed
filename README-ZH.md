@@ -58,6 +58,7 @@
   - 未来新增的中继可以并存，不会破坏老客户端
 - 响应携带随机填充(抗 DPI)
 - **多域名**(`--extra-domains` / `THEFEED_EXTRA_DOMAINS`):服务器在主域名之外还可在多个子域名上响应 feed 查询，客户端把块请求分散到所有域名上(分担负载,且某个域名被封时仍可用)。主域名对中继路径保持不变。导入 URI 用 `d=` 字段携带子域名。
+- **私信通道**(`--chat-domains` / `THEFEED_CHAT_DOMAINS`):可选的存储转发私信功能,服务于同一服务器的用户之间,运行在专用子域名上 — 见「私信通道」一节
 - 会话持久化 —— 登录一次后长期生效
 - 无 Telegram 模式(`--no-telegram`) —— 无凭据也能读公开频道
 - 所有数据统一存放在一个目录
@@ -124,6 +125,38 @@ optional caption
 | `--github-relay-ttl`          | `THEFEED_GITHUB_RELAY_TTL_MIN`       | `600` (min) | 孤儿对象在下一轮刷新时清理          |
 
 每小时的 DNS 报告会带上 `totalMediaQueries` 和一个 `mediaCache` 块(条数、字节数、命中、未命中、淘汰)。
+
+## 私信通道
+
+可选的、独立的存储转发私信功能,用于同一服务器的用户之间通信(与 Telegram 完全无关)。为服务器配置一个或多个专用子域名(必须不同于 feed 域名)即可启用:
+
+```bash
+thefeed-server ... --chat-domains c.example.com
+# 或: THEFEED_CHAT_DOMAINS=c.example.com
+```
+
+- **端到端加密**:只有双方能读取消息 — 服务器仅存储不透明数据块,并在不读取内容的情况下验证发送者。联系人名称永远不离开设备。
+- **身份**:客户端在本地生成恢复码;你的地址是由它派生的 20 个字符。通过其他渠道把地址告诉对方即可被联系;同一恢复码可在任何服务器上使用。
+- **失败即关闭的安全模型**:只有当配置中固定了服务器公钥(`sk=`)且聊天能力数据通过签名验证时,客户端才会启用私信。 feed 元数据中有一个签名比特位标明服务器是否有私信功能,因此没有密钥的客户端会提示「此服务器有私信 — 请用其密钥重新导入配置」而不是静默失败,且无私信的服务器上客户端绝不浪费一次探测。
+- **保留域名但关闭**:`--chat-enabled=false`(或 `THEFEED_CHAT_ENABLED=0`)保留域名配置但对外宣告私信已停用,客户端显示「此服务器已停用私信」。
+- **滥用限制**(自动告知客户端):`--chat-send-per-hour`(30)、`--chat-inbox-cap`(50)、`--chat-per-pair-cap`(10)、`--chat-max-msg-bytes`(500)。未送达的消息在 `--chat-ttl-hours`(72)后过期。
+- **账户默认永久保留**(`--chat-account-ttl-days 0`)以保证报告准确;繁忙的服务器可设置天数以回收闲置账户。`--chat-max-accounts`(0 = 无限)限制账户总数。
+- **持久性与吞吐的权衡**(`--chat-sync-seconds`,默认 1):消息库每 N 秒刷盘一次,因此崩溃时最多丢失约 N 秒内刚收到的消息(无妨——聊天端到端加密,发送方会重发)。设为 `0` 则每条消息都 fsync(严格持久,吞吐更低)。
+- 在客户端界面从侧边栏打开**私信**。✓ = 已存储到服务器,✓✓ = 对方已取走。两台设备上的安全表情一致即表示会话安全。
+
+每小时 DNS 报告包含 `totalChatQueries` 和 `chat` 块(账户数、消息数、注册数、会话数)。
+
+### 运维报告(TUI)
+
+服务器把每个每小时报告作为一行 JSON 追加到 `<data-dir>/dns_hourly.jsonl`(按大小轮转,保留若干备份)。服务器二进制自身用 `--report` 从该文件渲染终端仪表板,不在网络上提供任何服务,只读取数据目录:
+
+```bash
+thefeed-server --report                       # 读取 ./data/dns_hourly.jsonl 和 ./data/chat.db
+thefeed-server --data-dir /srv/thefeed --report
+thefeed-server --report --report-refresh 5s   # 实时,每 5 秒刷新
+```
+
+它显示总查询/频道抓取/元数据/媒体/私信查询、带条形图的每频道均值、各域名总计、每报告火花线、按小时查询量以及私信统计(包括来自 `chat.db` 的实时账户数)— 与 `scripts/thefeed_log_report.py` 相同的聚合,绘制在终端中。
 
 ## 赞助
 
