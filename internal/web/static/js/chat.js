@@ -24,7 +24,8 @@ var chatState = {
   nextPollAt: 0,    // epoch ms of the next foreground poll
   vvBound: false,   // visualViewport listener attached
   notifyReady: false,
-  promptCb: null    // pending chatPrompt callback
+  promptCb: null,    // pending chatPrompt callback
+  renderPending: false // a poll/status render was deferred while a popup was open
 };
 
 // While the messenger is OPEN, poll the server this often for new messages and
@@ -370,7 +371,31 @@ function chatRenderIntro() {
   document.getElementById('chatModal').innerHTML = html;
 }
 
+// chatOverlayOpen reports whether any chat popup (action sheet, rename prompt,
+// log) is on screen. They're all appended into #chatModal and share the
+// .chat-sheet-overlay class. The periodic poll / status refresh must NOT
+// rebuild the list/thread innerHTML while one is open — that would wipe the
+// popup and steal keyboard focus. Such a render is deferred (renderPending)
+// and flushed when the popup closes.
+function chatOverlayOpen() {
+  return !!document.querySelector('#chatModal .chat-sheet-overlay');
+}
+
+// chatFlushPendingRender re-renders the current view if a render was deferred
+// while a popup was open. Deferred a tick so a close-then-reopen (e.g. a sheet
+// refreshing itself) doesn't trigger a wasted render.
+function chatFlushPendingRender() {
+  setTimeout(function () {
+    if (!chatState.renderPending || !chatState.open || chatOverlayOpen()) return;
+    chatState.renderPending = false;
+    if (chatState.view === 'thread') chatRenderThread();
+    else chatRenderList();
+  }, 0);
+}
+
 function chatRenderList() {
+  if (chatOverlayOpen()) { chatState.renderPending = true; return; }
+  chatState.renderPending = false;
   chatState.view = 'list';
   var info = chatState.info || {};
   var avail = chatState.avail; // null = still checking
@@ -632,6 +657,10 @@ function chatPickServer(addr, key) {
 // ---- conversation view ----
 
 async function openChatThread(addr) {
+  // Opening a conversation dismisses any open sheet (e.g. the server picker),
+  // so the render guard doesn't defer this user-initiated navigation.
+  var s = document.getElementById('chatSheet');
+  if (s) s.remove();
   chatState.view = 'thread';
   chatState.peer = addr;
   if (!chatThreadPushed) {
@@ -692,6 +721,7 @@ function chatRowMenu(addr, pinned) {
 function chatCloseMenu() {
   var s = document.getElementById('chatSheet');
   if (s) s.remove();
+  chatFlushPendingRender();
 }
 
 // chatPrompt is an in-app replacement for the browser's prompt() (which looks
@@ -734,6 +764,7 @@ function chatPromptClose() {
   chatState.promptCb = null;
   var o = document.getElementById('chatPromptOverlay');
   if (o) o.remove();
+  chatFlushPendingRender();
 }
 
 async function chatPin(addr, pin) {
@@ -788,6 +819,9 @@ function chatThreadMenu() {
 async function chatRenderThread() {
   var addr = chatState.peer;
   if (!addr) return;
+  // A popup is open (rename prompt, menu, …): don't rebuild the thread — defer.
+  if (chatOverlayOpen()) { chatState.renderPending = true; return; }
+  chatState.renderPending = false;
   // Preserve the compose draft, caret and focus across re-renders: the 15s
   // foreground poll and the ✓✓ status refresh both re-render the thread, and
   // rebuilding innerHTML would otherwise wipe whatever the user is typing.
@@ -886,6 +920,8 @@ async function chatRenderThread() {
   html += '<div class="chat-charcount" id="chatCharCount"></div>';
   html += '</div>';
 
+  // A popup may have opened during the await above — don't wipe it.
+  if (chatOverlayOpen()) { chatState.renderPending = true; return; }
   document.getElementById('chatModal').innerHTML = html;
   var body = document.getElementById('chatMsgsBody');
   if (body) body.scrollTop = keepScroll ? prevScroll : body.scrollHeight;
@@ -1122,6 +1158,7 @@ function chatOpenLog() {
 function chatCloseLog() {
   var o = document.getElementById('chatLogOverlay');
   if (o) o.remove();
+  chatFlushPendingRender();
 }
 
 // chatLogLive is called by addLogLine (log.js) for each new line so the in-chat
