@@ -27,7 +27,11 @@ var chatState = {
   promptCb: null,    // pending chatPrompt callback
   renderPending: false, // a poll/status render was deferred while a popup was open
   guideAfterAvail: false, // show "checking servers" + open the server sheet once availability resolves
-  draft: '' // current compose text — single source of truth (see chatRenderThread)
+  draft: '', // current compose text — single source of truth (see chatRenderThread)
+  curServer: '', // server the open conversation currently sends via
+  safetyOpen: false, // inline safety-code explainer expanded
+  connecting: false, // "connecting…" indicator currently shown for the in-flight send
+  sendConnTimer: null // delayed reveal of the "connecting…" indicator
 };
 
 // First-run server guidance: while NO chat server is enabled, every messenger
@@ -51,6 +55,47 @@ function chatT(key) { return t(key) || key }
 function chatName(addr) {
   if (chatState.contacts[addr]) return chatState.contacts[addr];
   return addr.slice(0, 6) + '…' + addr.slice(-4);
+}
+
+// chatDir: UI base direction (rtl for Persian) — for lines starting with an LTR value.
+function chatDir() { return (typeof lang !== 'undefined' && lang === 'fa') ? 'rtl' : 'ltr'; }
+
+// chatFmtBidi fills a "{key}" template, escaping literals and <bdi>-wrapping
+// values so an LTR value doesn't scramble RTL text.
+function chatFmtBidi(template, vars) {
+  return String(template).replace(/\{(\w+)\}|[^{]+/g, function (seg, key) {
+    if (key != null) return '<bdi>' + esc(vars[key] != null ? String(vars[key]) : '') + '</bdi>';
+    return esc(seg);
+  });
+}
+
+// chatAvatarHTML renders an initial avatar (coloured circle + first letter;
+// colour derived from the name, so stable per contact).
+function chatAvatarColor(s) {
+  var palette = ['#e57373', '#f06292', '#ba68c8', '#9575cd', '#7986cb',
+    '#64b5f6', '#4fc3f7', '#4dd0e1', '#4db6ac', '#81c784',
+    '#aed581', '#dce775', '#ffd54f', '#ffb74d', '#ff8a65'];
+  var h = 0;
+  for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+function chatAvatarHTML(name, size) {
+  size = size || 36;
+  var disp = (name || '').trim() || '?';
+  return '<div class="chat-avatar" style="width:' + size + 'px;height:' + size +
+    'px;font-size:' + Math.round(size * 0.45) + 'px;background:' + chatAvatarColor(disp) + '">' +
+    esc(disp.charAt(0).toUpperCase()) + '</div>';
+}
+
+// chatServerLabel maps a server key to its display name (operator-set, defaults
+// to the domain).
+function chatServerLabel(key) {
+  if (!key) return '';
+  var list = (chatState.avail && chatState.avail.servers) || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].key === key) return list[i].name || list[i].domain || key;
+  }
+  return key;
 }
 
 function chatFmtTime(ts) {
@@ -544,7 +589,7 @@ function chatRenderList() {
       var nm = th.name || chatName(th.addr);
       var pinMark = th.pinned ? ('<span class="chat-pin-mark">' + icon('pinned') + '</span> ') : '';
       html += '<div class="chat-thread-item" onclick="openChatThread(\'' + escAttr(th.addr) + '\')">' +
-        '<div class="chat-avatar">' + esc((nm[0] || '?').toUpperCase()) + '</div>' +
+        chatAvatarHTML(nm, 38) +
         '<div class="chat-thread-main"><div class="chat-thread-name">' + pinMark + esc(nm) + '</div>' +
         '<div class="chat-thread-last">' + esc(th.lastText || '') + '</div></div>' +
         (th.unread ? '<span class="chat-unread-badge">' + th.unread + '</span>' : '') +
@@ -562,7 +607,28 @@ function chatRenderList() {
 }
 
 function chatCopy(v) {
-  navigator.clipboard.writeText(v).then(function () { showToast(t('copied')) }).catch(function () { });
+  var ok = function () { showToast(chatT('chat_copied')); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(v).then(ok, function () { if (chatCopyFallback(v)) ok(); });
+    return;
+  }
+  // WebViews (and non-secure contexts) can lack the async clipboard API.
+  if (chatCopyFallback(v)) ok();
+}
+function chatCopyFallback(v) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = v;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var done = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return done;
+  } catch (e) { return false; }
 }
 
 // chatCopyMsg copies a bubble's text, read from the DOM (never inlined into the
@@ -727,6 +793,7 @@ async function openChatThread(addr) {
   chatState.view = 'thread';
   chatState.peer = addr;
   chatState.draft = ''; // each conversation starts with an empty compose box
+  chatState.safetyOpen = false; // collapse the safety explainer per conversation
   if (!chatThreadPushed) {
     try { history.pushState({ view: 'chatThread' }, ''); chatThreadPushed = true; } catch (e) { }
   }
@@ -745,21 +812,11 @@ async function chatThreadRefresh() {
   await chatPollNow();
 }
 
-// chatSafetyInfo toggles a persistent explainer banner at the top of the
-// conversation (a transient toast was easy to miss, especially on touch).
-function chatSafetyInfo() {
-  var body = document.getElementById('chatMsgsBody');
-  if (!body) return;
-  var existing = document.getElementById('chatSafetyBanner');
-  if (existing) { existing.remove(); return; }
-  var st = chatState.peerStatus[chatState.peer] || {};
-  var emo = st.emojis ? st.emojis.join(' ') + ' — ' : '';
-  var div = document.createElement('div');
-  div.id = 'chatSafetyBanner';
-  div.className = 'chat-banner chat-banner-info';
-  div.textContent = emo + chatT('chat_safety_explain');
-  body.insertBefore(div, body.firstChild);
-  div.scrollIntoView({ block: 'nearest' });
+// chatToggleSafety expands/collapses the safety-code explainer (state-backed so
+// a re-render keeps it open).
+function chatToggleSafety(el) {
+  chatState.safetyOpen = !chatState.safetyOpen;
+  if (el) el.classList.toggle('open', chatState.safetyOpen);
 }
 
 // chatRowMenu shows an action sheet (pin/unpin + delete) for a list row.
@@ -918,17 +975,20 @@ async function chatRenderThread() {
     { accepted: data.accepted || 0, delivered: data.delivered || 0 };
   var nm = data.name || chatName(addr);
   var threadServer = data.server || chatState.pendingServer[addr] || '';
+  chatState.curServer = threadServer; // server this conversation currently sends via
+  // hasOut: have we replied yet? (gates the stranger warning)
+  var hasOut = false;
+  for (var mi0 = 0; mi0 < msgs.length; mi0++) {
+    if (msgs[mi0].dir === 'out') { hasOut = true; break; }
+  }
 
   var html = '';
   html += '<div class="chat-topbar">';
   html += '<button class="chat-back" onclick="chatBackToList()" aria-label="back">' + icon('arrowLeft') + '</button>';
-  html += '<div class="chat-topbar-title" onclick="chatRenamePeer()" style="cursor:pointer">' +
-    '<div class="chat-peer-name">' + esc(nm) + ' ' + icon('edit') + '</div>' +
-    '<div class="chat-peer-sub">' + esc(addr) + (threadServer ? ' · ' + esc(threadServer) : '') + '</div></div>';
-  if (st.emojis) {
-    html += '<button type="button" class="chat-safety" title="' + escAttr(chatT('chat_safety_explain')) +
-      '" onclick="chatSafetyInfo()">' + st.emojis.join('') + '</button>';
-  }
+  // Avatar + tappable name → contact panel. Single line so it centers with the avatar.
+  html += '<div class="chat-topbar-title" onclick="chatContactInfo()" style="cursor:pointer">' +
+    chatAvatarHTML(nm, 36) +
+    '<div class="chat-topbar-name-wrap"><div class="chat-peer-name">' + esc(nm) + '</div></div></div>';
   html += '<button id="chatRefreshBtn" class="chat-icon-btn' + (chatState.polling ? ' spinning' : '') + '" ' +
     (chatState.polling ? 'disabled ' : '') + 'title="' + escAttr(chatT('chat_refresh')) + '" onclick="chatThreadRefresh()">' + icon('refresh') + '</button>';
   html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_menu')) +
@@ -939,6 +999,13 @@ async function chatRenderThread() {
     '<span class="chat-progress-label" id="chatRecvProgressLabel"></span></div>';
 
   html += '<div class="chat-body" id="chatMsgsBody">';
+  // E2E safety code at the top; tap to expand the explainer.
+  if (st.emojis) {
+    html += '<div class="chat-sysmsg chat-safety-sep' + (chatState.safetyOpen ? ' open' : '') +
+      '" onclick="chatToggleSafety(this)">' +
+      '<span dir="auto">' + esc(st.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) + '</span>' +
+      '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div></div>';
+  }
   if (!msgs.length) {
     html += '<div class="chat-empty">' + esc(chatT('chat_no_messages')) + '</div>';
   }
@@ -946,14 +1013,15 @@ async function chatRenderThread() {
   // neither replied nor named the contact — anyone holding the address can
   // write, so warn before the user trusts links or shares anything private.
   // Replying or naming the contact clears it (the user has decided who it is).
-  var hasOut = false;
-  for (var mi = 0; mi < msgs.length; mi++) {
-    if (msgs[mi].dir === 'out') { hasOut = true; break; }
-  }
   if (msgs.length && !hasOut && !data.name && !chatState.contacts[addr]) {
     html += '<div class="chat-banner chat-banner-warn" dir="auto">' + esc(chatT('chat_stranger_warn')) + '</div>';
   }
-  var lastDate = '';
+  // peerServer: the latest server the peer messaged from (≠ threadServer ⇒ moved).
+  var peerServer = '', peerTS = 0;
+  for (var pj = msgs.length - 1; pj >= 0; pj--) {
+    if (msgs[pj].dir === 'in' && msgs[pj].server) { peerServer = msgs[pj].server; peerTS = msgs[pj].ts || 0; break; }
+  }
+  var lastDate = '', lastServer = '';
   msgs.forEach(function (m) {
     // Day separator: insert a centered date chip whenever the day changes, so a
     // multi-day conversation reads correctly (Jalali for fa, Gregorian for en).
@@ -962,6 +1030,12 @@ async function chatRenderThread() {
       html += '<div class="chat-date-sep"><span dir="auto">' + esc(dateStr) + '</span></div>';
       lastDate = dateStr;
     }
+    // Separator where the conversation's server changed.
+    if (m.server && lastServer && m.server !== lastServer) {
+      html += '<div class="chat-sysmsg"><span dir="auto">' +
+        chatFmtBidi(chatT('chat_server_changed'), { s: chatServerLabel(m.server) }) + '</span></div>';
+    }
+    if (m.server) lastServer = m.server;
     var ticks = '';
     if (m.dir === 'out') {
       if (st.delivered >= m.seq) ticks = ' ✓✓';
@@ -976,6 +1050,17 @@ async function chatRenderThread() {
       '<span class="chat-msg-time">' + chatFmtTime(m.ts) + esc(ticks) + '</span></span></div>' +
       '<div class="chat-clearfix"></div>';
   });
+  // Peer moved to a server we don't send through, after our own last switch →
+  // offer to follow (server-verified).
+  if (peerServer && threadServer && peerServer !== threadServer && peerTS > (data.serverSetAt || 0)) {
+    var plabel = chatServerLabel(peerServer);
+    html += '<div class="chat-switch-banner" dir="' + chatDir() + '">' +
+      '<div class="chat-switch-text">' +
+      chatFmtBidi(chatT('chat_peer_switched'), { n: nm, s: plabel }) +
+      '</div><button class="chat-btn-primary chat-switch-btn" onclick="chatSwitchServer(\'' +
+      escAttr(peerServer) + '\')">' +
+      chatFmtBidi(chatT('chat_switch_reply'), { s: plabel }) + '</button></div>';
+  }
   html += '</div>';
 
   html += '<div class="chat-footer">';
@@ -1004,8 +1089,10 @@ async function chatRenderThread() {
   // sending) and repaint the live send-progress bar this render destroyed.
   if (chatState.sending) {
     if (inp) inp.disabled = true;
-    if (chatState.sendProg) {
+    if (chatState.sendProg && chatState.sendProg.done >= 1) {
       chatShowProgress('chatSendProgress', chatState.sendProg.done, chatState.sendProg.total, '↑');
+    } else if (chatState.connecting) {
+      chatShowProgress('chatSendProgress', 0, 1, '↑'); // keep the "connecting…" bar
     }
   }
   chatInputResize();
@@ -1080,6 +1167,102 @@ function chatBackToList() {
   chatShowList();
 }
 
+// chatContactInfo is the contact panel: rename, copy account ID, change server.
+function chatContactInfo() {
+  var addr = chatState.peer;
+  if (!addr) return;
+  chatCloseMenu();
+  var nm = chatState.contacts[addr] || chatName(addr);
+  var st = chatState.peerStatus[addr] || {};
+  var sheet = document.createElement('div');
+  sheet.className = 'chat-sheet-overlay';
+  sheet.id = 'chatSheet';
+  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  var h = '<div class="chat-sheet">' +
+    '<div class="chat-info-head">' + chatAvatarHTML(nm, 56) +
+    '<div class="chat-sheet-title">' + esc(nm) + '</div></div>';
+  h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_account_id')) + '</div>' +
+    '<div class="chat-info-value chat-info-id" dir="ltr">' + esc(addr) + '</div>' +
+    '<button class="chat-btn-soft" onclick="chatCopy(\'' + escAttr(addr) + '\')">' + esc(chatT('chat_copy')) + '</button></div>';
+  // Safety code, next to the address.
+  if (st.emojis) {
+    h += '<div class="chat-info-field" title="' + escAttr(chatT('chat_safety_explain')) + '">' +
+      '<div class="chat-info-label">' + esc(chatT('chat_safety_code')) + '</div>' +
+      '<div class="chat-info-value chat-info-safety">' + esc(st.emojis.join(' ')) + '</div></div>';
+  }
+  h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_info_server')) + '</div>' +
+    '<div class="chat-info-value" dir="auto"><bdi>' + esc(chatServerLabel(chatState.curServer)) + '</bdi></div>' +
+    '<button class="chat-btn-soft" onclick="chatCloseMenu();chatSwitchServerSheet()">' + esc(chatT('chat_change_server')) + '</button></div>';
+  h += '<button class="chat-sheet-item" onclick="chatContactRename()">' + icon('edit') + ' ' + esc(chatT('chat_rename')) + '</button>';
+  h += '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('close')) + '</button></div>';
+  sheet.innerHTML = h;
+  document.getElementById('chatModal').appendChild(sheet);
+}
+
+function chatContactRename() {
+  chatCloseMenu();
+  chatRenamePeer();
+}
+
+// chatSwitchServerSheet moves the conversation to another server (verified
+// server-side). reasonHtml, if given, is shown as a top warning (bidi-safe HTML).
+function chatSwitchServerSheet(reasonHtml) {
+  var addr = chatState.peer;
+  if (!addr) return;
+  chatCloseMenu();
+  var servers = chatUsableServers();
+  var sheet = document.createElement('div');
+  sheet.className = 'chat-sheet-overlay';
+  sheet.id = 'chatSheet';
+  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  var items = '<div class="chat-sheet-title">' + esc(chatT('chat_switch_server_title')) + '</div>' +
+    (reasonHtml
+      ? '<div class="chat-sheet-warn" dir="' + chatDir() + '">' + reasonHtml + '</div>'
+      : '<div class="chat-sheet-hint">' + esc(chatT('chat_switch_server_hint')) + '</div>');
+  if (!servers.length) {
+    items += '<div class="chat-sheet-hint">' + esc(chatT('chat_checking')) + '</div>';
+  }
+  servers.forEach(function (sv) {
+    var label = (sv.name ? sv.name + ' — ' : '') + sv.domain;
+    var cur = sv.key === chatState.curServer;
+    items += '<button class="chat-sheet-item"' + (cur ? ' disabled' : '') +
+      ' onclick="chatSwitchServer(\'' + escAttr(sv.key) + '\')">' + esc(label) +
+      (cur ? ' · <span class="chat-server-current">' + esc(chatT('chat_server_current')) + '</span>' : '') + '</button>';
+  });
+  items += '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>';
+  sheet.innerHTML = '<div class="chat-sheet">' + items + '</div>';
+  document.getElementById('chatModal').appendChild(sheet);
+}
+
+// chatSwitchServer rebinds the conversation to serverKey (backend verifies the
+// peer is registered there).
+async function chatSwitchServer(serverKey) {
+  var addr = chatState.peer;
+  if (!addr) return;
+  chatCloseMenu();
+  showToast(chatT('chat_switch_checking'));
+  try {
+    var r = await fetch('/api/chat/setserver', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peer: addr, server: serverKey })
+    });
+    var d = await r.json();
+    if (d.ok) {
+      chatState.curServer = d.server;
+      delete chatState.pendingServer[addr];
+      showToast(chatT('chat_switched_server'));
+      if (chatState.view === 'thread' && chatState.peer === addr) chatRenderThread();
+    } else {
+      var emsg = chatT(d.error || 'chat_err_generic');
+      showToast(emsg);
+      // Peer not on the chosen server → reopen the picker with the warning.
+      if (d.error === 'chat_err_peer_not_on_server') chatSwitchServerSheet(esc(emsg));
+    }
+  } catch (e) {
+    showToast(chatT('chat_err_generic'));
+  }
+}
+
 function chatRenamePeer() {
   var addr = chatState.peer;
   if (!addr) return;
@@ -1118,9 +1301,18 @@ async function sendChatMessage() {
 
   chatState.sending = true;
   chatState.sendProg = { done: 0, total: 1 };
+  chatState.connecting = false;
   btn.disabled = true;
   inp.disabled = true;
-  chatShowProgress('chatSendProgress', 0, 1, '↑');
+  // Reveal "connecting…" only if no block has gone out after a short delay
+  // (cold-start session open); warm sends skip straight to the block bar.
+  clearTimeout(chatState.sendConnTimer);
+  chatState.sendConnTimer = setTimeout(function () {
+    if (chatState.sending && (!chatState.sendProg || chatState.sendProg.done < 1)) {
+      chatState.connecting = true;
+      chatShowProgress('chatSendProgress', 0, 1, '↑'); // done==0 → indeterminate "connecting…"
+    }
+  }, 700);
 
   var peerAddr = chatState.peer;
   try {
@@ -1155,12 +1347,19 @@ async function sendChatMessage() {
         msg += ' (' + chatFmtTime(d.resetUnix) + ')';
       }
       showToast(msg);
+      // Not on this server → open the picker with a reason.
+      if (d.error === 'chat_err_unknown_recipient' && chatUsableServers().length > 1) {
+        chatSwitchServerSheet(chatFmtBidi(chatT('chat_switch_because_absent'),
+          { n: chatState.contacts[peerAddr] || chatName(peerAddr), s: chatServerLabel(chatState.curServer) }));
+      }
     }
   } catch (e) {
     showToast(chatT('chat_err_generic'));
   } finally {
     chatState.sending = false;
     chatState.sendProg = null;
+    clearTimeout(chatState.sendConnTimer);
+    chatState.connecting = false;
     var inp2 = document.getElementById('chatInput');
     if (inp2) inp2.disabled = false;
     chatInputResize(); // recompute the send button's enabled state
@@ -1256,15 +1455,24 @@ function chatShowProgress(id, done, total, arrow) {
   if (!(total > 0) || done >= total) { chatHideProgress(id); return; }
   bar.classList.add('active');
   var fill = document.getElementById(id + 'Fill');
-  if (fill && total > 0) fill.style.width = Math.round(done * 100 / total) + '%';
   var label = document.getElementById(id + 'Label');
-  if (label) label.textContent = (arrow || '') + ' ' + done + '/' + total + ' ' + chatT('chat_blocks');
+  // Send at done==0 (still opening the session): show an indeterminate
+  // "connecting…" bar instead of a frozen 0/N.
+  var connecting = (id === 'chatSendProgress' && done === 0);
+  bar.classList.toggle('indeterminate', connecting);
+  if (fill) fill.style.width = connecting ? '100%' : (Math.round(done * 100 / total) + '%');
+  if (label) {
+    label.textContent = connecting
+      ? chatT('chat_connecting')
+      : ((arrow || '') + ' ' + done + '/' + total + ' ' + chatT('chat_blocks'));
+  }
 }
 
 function chatHideProgress(id) {
   var bar = document.getElementById(id);
   if (!bar) return;
   bar.classList.remove('active');
+  bar.classList.remove('indeterminate');
   var fill = document.getElementById(id + 'Fill');
   if (fill) fill.style.width = '0';
   var label = document.getElementById(id + 'Label');
@@ -1288,7 +1496,12 @@ function chatOnSSE(data) {
   if (data.type === 'progress') {
     if (data.op === 'send') {
       chatState.sendProg = { done: data.done, total: data.total };
-      chatShowProgress('chatSendProgress', data.done, data.total, '↑');
+      // done==0: leave it to the connecting timer; the block bar shows once acked.
+      if (data.done >= 1) {
+        clearTimeout(chatState.sendConnTimer);
+        chatState.connecting = false;
+        chatShowProgress('chatSendProgress', data.done, data.total, '↑');
+      }
     }
     else if (data.op === 'poll') chatShowPollProgress(data.done, data.total);
     return;

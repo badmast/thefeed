@@ -598,3 +598,82 @@ func TestChatClientUnknownRecipient(t *testing.T) {
 		t.Fatalf("err = %v, want keyfetch not_found", err)
 	}
 }
+
+// TestChatPermanentSendErr pins which send errors are permanent (return
+// immediately) vs retryable (keep trying). The key case: ErrChatDisabled is
+// EnsureInfo's transient first-contact error, so it MUST be retryable — else a
+// cold first send gives up on one network miss.
+func TestChatPermanentSendErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no server key", ErrChatNoServerKey, true},
+		{"server turned chat off", ErrChatServerDisabled, true},
+		{"unverified info", ErrChatUnverified, true},
+		{"keyfetch not_found", &ChatStatusError{Op: protocol.ChatOpKeyFetch, Status: protocol.ChatStatusNotFound}, true},
+		{"disabled is retryable (transient first contact)", ErrChatDisabled, false},
+		{"unreachable is retryable", ErrChatUnreachable, false},
+		{"generic transport is retryable", errors.New("dns exchange failed"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := chatPermanentSendErr(c.err); got != c.want {
+			t.Errorf("%s: chatPermanentSendErr = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestChatClientRegisterPublishesRecord backs the "register on server enable"
+// flow: Register() must publish the identity record (via the register
+// handshake) so the account becomes reachable — i.e. another client can then
+// fetch its key / see it as registered, without any message being sent first.
+func TestChatClientRegisterPublishesRecord(t *testing.T) {
+	ts := newChatTestServer(t, protocol.DefaultChatLimits())
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Before A registers, B can't find A on this server.
+	if ok, err := b.IsRegistered(ctx, a.Identity().Addr); err != nil || ok {
+		t.Fatalf("pre-register: ok=%v err=%v, want false,nil", ok, err)
+	}
+	// Enabling a server registers the identity there.
+	if err := a.Register(ctx, nil); err != nil {
+		t.Fatalf("register A: %v", err)
+	}
+	if !a.Registered() {
+		t.Fatal("A should report registered after Register()")
+	}
+	// Now A is reachable: B finds A's record without A ever sending.
+	if ok, err := b.IsRegistered(ctx, a.Identity().Addr); err != nil || !ok {
+		t.Fatalf("post-register: ok=%v err=%v, want true,nil", ok, err)
+	}
+}
+
+// TestChatClientIsRegistered backs the server-switch flow: switching a
+// conversation to a new server is only allowed once the peer is confirmed
+// registered there. A registered peer → (true,nil); an unknown address →
+// (false,nil) without an error, so the UI can show "not on that server".
+func TestChatClientIsRegistered(t *testing.T) {
+	ts := newChatTestServer(t, protocol.DefaultChatLimits())
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+
+	if ok, err := a.IsRegistered(ctx, b.Identity().Addr); err != nil || !ok {
+		t.Fatalf("registered peer: ok=%v err=%v, want true,nil", ok, err)
+	}
+
+	var ghost [protocol.AddressSize]byte
+	ghost[5] = 0x42
+	if ok, err := a.IsRegistered(ctx, ghost); err != nil || ok {
+		t.Fatalf("unknown peer: ok=%v err=%v, want false,nil", ok, err)
+	}
+}

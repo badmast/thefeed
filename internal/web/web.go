@@ -485,6 +485,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/chat/threads", s.handleChatThreads)
 	mux.HandleFunc("/api/chat/thread", s.handleChatThread)
 	mux.HandleFunc("/api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("/api/chat/setserver", s.handleChatSetServer)
 	mux.HandleFunc("/api/chat/send", s.handleChatSend)
 	mux.HandleFunc("/api/chat/poll", s.handleChatPoll)
 	mux.HandleFunc("/api/chat/peer-status", s.handleChatPeerStatus)

@@ -249,3 +249,110 @@ func TestChatSendRoundTrip(t *testing.T) {
 		t.Fatalf("inbox not freed: count=%d", body[6])
 	}
 }
+
+// sendStartBitSet reports whether chunk i is marked received in a SEND_START
+// response (6 quota bytes, then the reassembler bitmap, MSB-first).
+func sendStartBitSet(body []byte, i int) bool {
+	bm := body[6:]
+	return i/8 < len(bm) && bm[i/8]&(1<<(7-uint(i%8))) != 0
+}
+
+// TestChatResumesPartialUpload verifies that a repeat SEND_START for the same
+// in-progress message RESUMES instead of discarding the chunks already received
+// — so a client retrying on the same live session doesn't re-send the half it
+// already delivered. (A new session resets, since sess.upload is nil there.)
+func TestChatResumesPartialUpload(t *testing.T) {
+	svc, qk, ekPub := newChatSvc(t)
+	a := newSimClient(t)
+	b := newSimClient(t)
+	refA, ksA := registerHandshake(t, svc, qk, ekPub, a)
+	registerHandshake(t, svc, qk, ekPub, b) // recipient must exist to send
+
+	const text = "a long enough message to span several chunks — سلام دوست عزیز"
+	const seq = uint32(1)
+	contentKey, _ := protocol.ChatContentKey(a.enc, b.enc.PublicKey().Bytes(), a.addr, b.addr, seq)
+	kssA, _ := protocol.ChatServerSharedKey(a.enc, ekPub, a.enc.PublicKey().Bytes(), ekPub)
+	env, err := protocol.EncodeChatMessage(contentKey, kssA, a.addr, b.addr, seq, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := protocol.SplitChunks(env, protocol.ChatDataChunkSize)
+	if len(chunks) < 2 {
+		t.Fatalf("need a multi-chunk message, got %d chunk(s)", len(chunks))
+	}
+
+	ctrA := uint32(0)
+	// Fresh SEND_START: chunk 0 not yet received.
+	st, body := chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatSendStartPlain(b.addr, uint16(len(env))))
+	if st != protocol.ChatStatusOK {
+		t.Fatalf("send-start st=%d", st)
+	}
+	if sendStartBitSet(body, 0) {
+		t.Fatal("fresh send-start should not report chunk 0 as received")
+	}
+	// Deliver only chunk 0, then a transport blip — the client retries by
+	// re-issuing SEND_START on the SAME session.
+	d0, _ := protocol.BuildChatDataPlain(0, chunks[0])
+	if st, _ := chatOp(t, svc, refA, ksA, &ctrA, d0); st != protocol.ChatStatusOK {
+		t.Fatalf("data 0 st=%d", st)
+	}
+	st, body = chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatSendStartPlain(b.addr, uint16(len(env))))
+	if st != protocol.ChatStatusOK {
+		t.Fatalf("resume send-start st=%d", st)
+	}
+	if !sendStartBitSet(body, 0) {
+		t.Fatal("resumed send-start must report chunk 0 already received (no re-send)")
+	}
+
+	// Finish the remaining chunks + FIN: the resumed upload still commits.
+	for i := 1; i < len(chunks); i++ {
+		d, _ := protocol.BuildChatDataPlain(uint8(i), chunks[i])
+		if st, _ := chatOp(t, svc, refA, ksA, &ctrA, d); st != protocol.ChatStatusOK {
+			t.Fatalf("data %d st=%d", i, st)
+		}
+	}
+	if st, _ := chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatFinPlain(crc32.ChecksumIEEE(env))); st != protocol.ChatStatusOK {
+		t.Fatalf("fin st=%d", st)
+	}
+}
+
+// TestChatSendStartResetsDifferentMessage is the negative of resume: a
+// SEND_START for a DIFFERENT message (here, a different total length) must NOT
+// resume onto the in-progress upload's chunks — it starts fresh, so messages
+// can never be mixed.
+func TestChatSendStartResetsDifferentMessage(t *testing.T) {
+	svc, qk, ekPub := newChatSvc(t)
+	a := newSimClient(t)
+	b := newSimClient(t)
+	refA, ksA := registerHandshake(t, svc, qk, ekPub, a)
+	registerHandshake(t, svc, qk, ekPub, b)
+
+	const text = "a long enough message to span several chunks سلام دوست"
+	contentKey, _ := protocol.ChatContentKey(a.enc, b.enc.PublicKey().Bytes(), a.addr, b.addr, 1)
+	kssA, _ := protocol.ChatServerSharedKey(a.enc, ekPub, a.enc.PublicKey().Bytes(), ekPub)
+	env, err := protocol.EncodeChatMessage(contentKey, kssA, a.addr, b.addr, 1, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := protocol.SplitChunks(env, protocol.ChatDataChunkSize)
+	if len(chunks) < 2 {
+		t.Fatalf("need a multi-chunk message, got %d", len(chunks))
+	}
+
+	ctrA := uint32(0)
+	if st, _ := chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatSendStartPlain(b.addr, uint16(len(env)))); st != protocol.ChatStatusOK {
+		t.Fatalf("send-start st=%d", st)
+	}
+	d0, _ := protocol.BuildChatDataPlain(0, chunks[0])
+	if st, _ := chatOp(t, svc, refA, ksA, &ctrA, d0); st != protocol.ChatStatusOK {
+		t.Fatalf("data 0 st=%d", st)
+	}
+	// SEND_START for a different total length → fresh upload, chunk 0 NOT carried.
+	st, body := chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatSendStartPlain(b.addr, uint16(len(env)+protocol.ChatDataChunkSize)))
+	if st != protocol.ChatStatusOK {
+		t.Fatalf("reset send-start st=%d", st)
+	}
+	if sendStartBitSet(body, 0) {
+		t.Fatal("a different message (other length) must reset, not resume onto chunk 0")
+	}
+}

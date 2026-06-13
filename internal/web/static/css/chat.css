@@ -151,7 +151,47 @@
 .chat-topbar-title {
   flex: 1;
   min-width: 0;
-  overflow: hidden
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 9px
+}
+
+.chat-topbar-name-wrap {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.25
+}
+
+/* Telegram-style initial avatar (coloured circle, first letter). */
+.chat-avatar {
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  line-height: 1;
+  text-transform: uppercase;
+  user-select: none
+}
+
+/* contact-info panel header: bigger avatar above the name. */
+.chat-info-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 14px 6px
+}
+
+.chat-info-head .chat-sheet-title {
+  padding: 0
 }
 
 .chat-topbar-title .chat-peer-name {
@@ -408,19 +448,6 @@
   background: var(--surface)
 }
 
-.chat-avatar {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  font-weight: 600;
-  flex-shrink: 0
-}
 
 .chat-thread-main {
   flex: 1;
@@ -514,11 +541,11 @@
   border: 1px solid currentColor;
   color: inherit;
   font-family: inherit;
-  font-size: var(--text-2xs);
+  font-size: 10px;
   cursor: pointer;
-  padding: 1px 8px;
-  line-height: 1.4;
-  opacity: .7;
+  padding: 0 5px;
+  line-height: 1.5;
+  opacity: .6;
   border-radius: var(--radius-xs);
   transition: opacity .15s
 }
@@ -547,6 +574,80 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 2px 10px
+}
+
+/* tappable send-server name in the conversation header */
+.chat-server-switch {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px
+}
+
+/* system separator in the message flow (e.g. "continued on <server>") */
+.chat-sysmsg {
+  clear: both;
+  text-align: center;
+  margin: 10px 0 6px
+}
+
+.chat-sysmsg span {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 2px 10px;
+  max-width: 90%
+}
+
+/* E2E safety-code label at the top of the conversation (tappable for details) */
+.chat-safety-sep {
+  margin: 8px 0 10px;
+  cursor: pointer
+}
+
+.chat-safety-sep span {
+  border-style: solid;
+  letter-spacing: 1px
+}
+
+.chat-safety-explain {
+  display: none;
+  max-width: 88%;
+  margin: 6px auto 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5
+}
+
+.chat-safety-sep.open .chat-safety-explain {
+  display: block
+}
+
+/* actionable banner: the peer moved to a server we're not sending through */
+.chat-switch-banner {
+  clear: both;
+  margin: 10px 4px 4px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start
+}
+
+.chat-switch-text {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5
+}
+
+.chat-switch-btn {
+  align-self: stretch
 }
 
 .chat-footer {
@@ -581,6 +682,19 @@
   width: 0;
   background: var(--accent);
   transition: width .25s
+}
+
+/* "connecting…" — opening the session before the first block can be sent.
+   Indeterminate sliding bar (no known progress yet). */
+.chat-progress.indeterminate .chat-progress-fill {
+  width: 40% !important;
+  transition: none;
+  animation: chat-indeterminate 1.1s ease-in-out infinite
+}
+
+@keyframes chat-indeterminate {
+  0% { margin-left: -40% }
+  100% { margin-left: 100% }
 }
 
 .chat-input-row {
@@ -730,6 +844,55 @@
   color: var(--text-dim);
   padding: 4px 14px 10px;
   line-height: 1.5
+}
+
+/* warning shown at the top of the server picker (e.g. "contact isn't here") */
+.chat-sheet-warn {
+  font-size: 12px;
+  color: var(--error);
+  background: var(--bg);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  margin: 2px 12px 10px;
+  padding: 8px 10px;
+  line-height: 1.5
+}
+
+.chat-server-current {
+  color: var(--success)
+}
+
+/* contact-info panel: account id / server / safety-code rows */
+.chat-info-safety {
+  font-size: 16px;
+  letter-spacing: 2px
+}
+
+.chat-info-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px
+}
+
+.chat-info-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  min-width: 70px
+}
+
+.chat-info-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all
+}
+
+.chat-info-id {
+  font-family: monospace;
+  font-size: 12px
 }
 
 /* one server row in the server sheet: name + state on the start side, toggle

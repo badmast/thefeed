@@ -147,12 +147,9 @@ const (
 	chatMaxFinRounds    = 6
 	chatMaxRestarts     = 3
 
-	// chatSendUploadAttempts bounds how many times SendMessage re-runs the whole
-	// (idempotent) upload when the resolver is dropping packets. Each attempt
-	// already retries cells/rounds/handshakes internally; this outer loop covers
-	// the case where even those exhaust, and reconciles against server state
-	// between tries so a dropped FIN-OK is recognised as a delivered message.
-	chatSendUploadAttempts = 10
+	// chatSendUploadAttempts caps whole-send retries (idempotent by seq); high so
+	// a cold start on a bad network still gets through.
+	chatSendUploadAttempts = 20
 
 	// chatMaxSessionCounter forces a re-handshake before the per-session op
 	// counter can reach the reserved counter regions (bootstrap 0x400000,
@@ -639,40 +636,40 @@ func (c *ChatClient) FetchPeerKey(ctx context.Context, addr [protocol.AddressSiz
 	return rec, nil
 }
 
+// IsRegistered reports whether peer can be messaged here. (false, nil) = no
+// record; a non-nil error is transient.
+func (c *ChatClient) IsRegistered(ctx context.Context, peer [protocol.AddressSize]byte) (bool, error) {
+	if _, err := c.FetchPeerKey(ctx, peer); err != nil {
+		var serr *ChatStatusError
+		if errors.As(err, &serr) &&
+			(serr.Status == protocol.ChatStatusNotFound || serr.Status == protocol.ChatStatusUnknownRecipient) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// chatPermanentSendErr reports whether a send error is final (retrying is futile).
+// ErrChatDisabled is excluded on purpose: EnsureInfo returns it for a transient
+// first-contact failure, so it must stay retryable.
+func chatPermanentSendErr(err error) bool {
+	if errors.Is(err, ErrChatNoServerKey) ||
+		errors.Is(err, ErrChatServerDisabled) || errors.Is(err, ErrChatUnverified) {
+		return true
+	}
+	var serr *ChatStatusError
+	return errors.As(err, &serr)
+}
+
 // SendMessage encrypts and uploads one message. seq must be greater than the
 // pair's last accepted seq (use NextSeq to recover it).
 func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize]byte, seq uint32, text string, progress ChatProgress) (*ChatSendResult, error) {
-	info, err := c.EnsureInfo(ctx)
-	if err != nil {
-		return nil, err
+	if len(text) == 0 {
+		return nil, fmt.Errorf("chat: empty message")
 	}
-	if len(text) == 0 || len(text) > int(info.Limits.MaxMsgBytes) {
-		return nil, fmt.Errorf("chat: message must be 1-%d bytes", info.Limits.MaxMsgBytes)
-	}
-	peerRec, err := c.FetchPeerKey(ctx, peer)
-	if err != nil {
-		return nil, err
-	}
-	contentKey, err := protocol.ChatContentKey(c.id.Enc, peerRec.EncPub, c.id.Addr, peer, seq)
-	if err != nil {
-		return nil, err
-	}
-	kss, err := protocol.ChatServerSharedKey(c.id.Enc, info.EkPub, c.id.Enc.PublicKey().Bytes(), info.EkPub)
-	if err != nil {
-		return nil, err
-	}
-	env, err := protocol.EncodeChatMessage(contentKey, kss, c.id.Addr, peer, seq, text)
-	if err != nil {
-		return nil, err
-	}
-	c.f.log("[chat] sending to %s seq=%d (%dB, %d blocks)…",
-		ChatAddressString(peer)[:8], seq, len(env),
-		(len(env)+protocol.ChatDataChunkSize-1)/protocol.ChatDataChunkSize)
 
-	// Progress must never go backwards. A mid-upload session loss restarts the
-	// byte upload from SEND_START, and an outer transport retry re-runs the whole
-	// upload — both would otherwise re-report from a lower baseline and make the
-	// bar look like it reset or cancelled. Clamp to a high-water mark.
+	// Clamp progress to a high-water mark so restarts/retries never go backwards.
 	mono := progress
 	if progress != nil {
 		hi := 0
@@ -686,49 +683,100 @@ func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize
 		}
 	}
 
-	// The upload is idempotent by seq (the server dedupes and never stores a
-	// duplicate), so a flaky resolver can only stall it, not corrupt it. Keep
-	// retrying on transport errors, and after each failure reconcile against
-	// authoritative server state: if the server already accepted this seq (a
-	// dropped FIN-OK), the message IS delivered — report success instead of a
-	// phantom failure the sender would have to guess about.
-	var lastErr error
+	// Retry the whole send (info, key, handshake, upload), not just the upload.
+	// Idempotent by seq; after a failed upload, reconcile via PeerStatus so a
+	// dropped FIN-OK counts as delivered.
+	var (
+		lastErr error
+		info    *protocol.ChatInfo
+		env     []byte
+	)
 	for attempt := 0; attempt < chatSendUploadAttempts; attempt++ {
-		st, lastAccepted, remaining, reset, err := c.upload(ctx, info, peer, env, mono)
-		if err == nil {
-			if st == protocol.ChatStatusOK {
-				c.updateQuota(remaining, reset)
-				c.f.log("[chat] sent to %s seq=%d (%d sends left this hour)", ChatAddressString(peer)[:8], seq, remaining)
-				return &ChatSendResult{Seq: seq, Remaining: remaining, ResetUnix: reset}, nil
+		// Build the prerequisites once; the cached fetches make later passes cheap.
+		if env == nil {
+			nfo, ierr := c.EnsureInfo(ctx)
+			if ierr != nil {
+				if chatPermanentSendErr(ierr) {
+					return nil, ierr // no key / chat off / unverified — retrying won't help
+				}
+				lastErr = ierr
+			} else if len(text) > int(nfo.Limits.MaxMsgBytes) {
+				return nil, fmt.Errorf("chat: message must be 1-%d bytes", nfo.Limits.MaxMsgBytes)
+			} else if peerRec, perr := c.FetchPeerKey(ctx, peer); perr != nil {
+				if chatPermanentSendErr(perr) {
+					return nil, perr // unknown recipient (keyfetch not_found) — permanent
+				}
+				lastErr = perr
+			} else {
+				contentKey, e := protocol.ChatContentKey(c.id.Enc, peerRec.EncPub, c.id.Addr, peer, seq)
+				if e != nil {
+					return nil, e
+				}
+				kss, e := protocol.ChatServerSharedKey(c.id.Enc, nfo.EkPub, c.id.Enc.PublicKey().Bytes(), nfo.EkPub)
+				if e != nil {
+					return nil, e
+				}
+				if env, e = protocol.EncodeChatMessage(contentKey, kss, c.id.Addr, peer, seq, text); e != nil {
+					return nil, e
+				}
+				info = nfo
+				c.f.log("[chat] sending to %s seq=%d (%dB, %d blocks)…",
+					ChatAddressString(peer)[:8], seq, len(env),
+					(len(env)+protocol.ChatDataChunkSize-1)/protocol.ChatDataChunkSize)
 			}
-			// Authoritative server rejection (quota/replay/…): not a transport
-			// problem, so don't retry — surface it to the caller.
-			serr := &ChatStatusError{Op: protocol.ChatOpFin, Status: st, Remaining: remaining, ResetUnix: reset}
-			if st == protocol.ChatStatusReplay {
-				serr.LastAccepted = lastAccepted
-			}
-			return nil, serr
 		}
-		lastErr = err
+
+		if env != nil {
+			st, lastAccepted, remaining, reset, uerr := c.upload(ctx, info, peer, env, mono)
+			if uerr == nil {
+				if st == protocol.ChatStatusOK {
+					c.updateQuota(remaining, reset)
+					c.f.log("[chat] sent to %s seq=%d (%d sends left this hour)", ChatAddressString(peer)[:8], seq, remaining)
+					return &ChatSendResult{Seq: seq, Remaining: remaining, ResetUnix: reset}, nil
+				}
+				// Authoritative rejection (quota/replay/…): surface it, don't retry.
+				// Drop the session so a later same-dst+len message can't resume onto
+				// a partial upload a SEND_START-stage reject left behind.
+				c.invalidateSession()
+				serr := &ChatStatusError{Op: protocol.ChatOpFin, Status: st, Remaining: remaining, ResetUnix: reset}
+				if st == protocol.ChatStatusReplay {
+					serr.LastAccepted = lastAccepted
+				}
+				return nil, serr
+			}
+			lastErr = uerr
+			// Did the message land despite the transport error? (lost FIN-OK)
+			if acc, _, perr := c.PeerStatus(ctx, peer); perr == nil && acc >= seq {
+				rem, rst, _ := c.Quota()
+				c.f.log("[chat] send to %s seq=%d confirmed on server after transport error", ChatAddressString(peer)[:8], seq)
+				return &ChatSendResult{Seq: seq, Remaining: rem, ResetUnix: rst}, nil
+			}
+		}
+
 		if ctx.Err() != nil {
+			lastErr = ctx.Err()
 			break
-		}
-		// Did the message land despite the transport error? (lost FIN-OK)
-		if acc, _, perr := c.PeerStatus(ctx, peer); perr == nil && acc >= seq {
-			rem, rst, _ := c.Quota()
-			c.f.log("[chat] send to %s seq=%d confirmed on server after transport error", ChatAddressString(peer)[:8], seq)
-			return &ChatSendResult{Seq: seq, Remaining: rem, ResetUnix: rst}, nil
 		}
 		if attempt+1 >= chatSendUploadAttempts {
 			break
 		}
+		backoff := time.Duration(attempt+1) * 500 * time.Millisecond
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second // capped so 20 attempts stay reasonably snappy
+		}
 		select {
 		case <-ctx.Done():
 			lastErr = ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+		case <-time.After(backoff):
 			continue
 		}
 		break
+	}
+	// Gave up mid-upload: drop the session so a different next message can't
+	// resume onto the leftover partial.
+	c.invalidateSession()
+	if lastErr == nil {
+		lastErr = ErrChatUnreachable
 	}
 	return nil, lastErr
 }

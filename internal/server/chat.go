@@ -504,7 +504,11 @@ func (c *ChatService) opSendStart(sess *chatSession, pt []byte, resp func(byte, 
 		return resp(protocol.ChatStatusBadRequest, nil)
 	}
 	c.mu.Lock()
-	sess.upload = &chatUpload{dst: ss.Dst, totalLen: int(ss.TotalLen), reasm: protocol.NewChunkReassembler(chunks)}
+	// Resume the same in-progress message (same dst+len) so a retry skips
+	// already-received chunks; a new session or different message starts fresh.
+	if sess.upload == nil || sess.upload.dst != ss.Dst || sess.upload.totalLen != int(ss.TotalLen) {
+		sess.upload = &chatUpload{dst: ss.Dst, totalLen: int(ss.TotalLen), reasm: protocol.NewChunkReassembler(chunks)}
+	}
 	bm := sess.upload.reasm.Bitmap()
 	c.mu.Unlock()
 	return resp(protocol.ChatStatusOK, append(appendQuota(nil, remaining, reset), bm...))

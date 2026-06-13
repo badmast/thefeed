@@ -32,6 +32,9 @@ const (
 	// the messenger view is closed.
 	chatPollActiveInterval = 30 * time.Second
 	chatPollFirstWait      = 45 * time.Second
+	// chatEnableRegisterAttempts: eager register+poll retries on server enable, so
+	// a flaky network still registers promptly (not only via the background loop).
+	chatEnableRegisterAttempts = 6
 )
 
 // chatIdentityFile is chat/identity.json.
@@ -63,6 +66,9 @@ type chatThreadFile struct {
 	// first peer-status DNS round trip returns.
 	LastAccepted  uint32 `json:"acc,omitempty"`
 	LastDelivered uint32 `json:"del,omitempty"`
+	// ServerSetAt: when the user last switched send server — the UI shows the
+	// "peer switched" banner only for peer messages newer than this.
+	ServerSetAt int64 `json:"serverSetAt,omitempty"`
 }
 
 // chatThreadsFile is chat/threads.json.
@@ -782,15 +788,34 @@ func (s *Server) handleChatEnable(w http.ResponseWriter, r *http.Request) {
 		ctx := h.ctx
 		h.mu.Unlock()
 
-		// Turning a server on registers the identity and pulls any waiting mail
-		// immediately, so the user sees it work without waiting for the loop.
+		// Register on the newly-enabled server (and pull mail) now, retrying a
+		// flaky network. pollServer opens a session, which auto-registers.
 		if req.On && ps != nil && ctx != nil {
 			go func() {
-				if n, err := h.pollServer(ctx, ps, nil); err != nil {
+				var lastErr error
+				for attempt := 0; attempt < chatEnableRegisterAttempts; attempt++ {
+					n, err := h.pollServer(ctx, ps, nil)
+					if err == nil {
+						h.setBackoff(ps, time.Time{}) // reachable → clear backoff
+						if n > 0 {
+							h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
+						}
+						return
+					}
+					lastErr = err
 					h.s.addLog("[chat] enable " + key + ": " + err.Error())
-				} else if n > 0 {
-					h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
+					backoff := time.Duration(attempt+1) * 1500 * time.Millisecond
+					if backoff > 5*time.Second {
+						backoff = 5 * time.Second
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
 				}
+				// Eager attempt exhausted — hand off to the background poll loop.
+				h.setBackoff(ps, time.Now().Add(chatServerBackoff(lastErr)))
 			}()
 		}
 		writeJSON(w, map[string]any{"ok": true})
@@ -1021,12 +1046,13 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		msgs = []chatStoredMsg{} // a typed-nil slice marshals to null; force []
 	}
 	resp := map[string]any{
-		"peer":      addr,
-		"name":      h.contacts[addr],
-		"msgs":      msgs,
-		"server":    th.Server,
-		"accepted":  th.LastAccepted,
-		"delivered": th.LastDelivered,
+		"peer":        addr,
+		"name":        h.contacts[addr],
+		"msgs":        msgs,
+		"server":      th.Server,
+		"accepted":    th.LastAccepted,
+		"delivered":   th.LastDelivered,
+		"serverSetAt": th.ServerSetAt,
 	}
 	h.mu.Unlock()
 	writeJSON(w, resp)
@@ -1167,6 +1193,67 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "seq": res.Seq,
 		"remaining": res.Remaining, "resetUnix": res.ResetUnix,
 	})
+}
+
+// handleChatSetServer rebinds a conversation to another server, only after
+// confirming the peer is registered there.
+func (s *Server) handleChatSetServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req struct {
+		Peer   string `json:"peer"`
+		Server string `json:"server"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	peer, err := client.ParseChatAddress(req.Peer)
+	if err != nil {
+		http.Error(w, "invalid peer", 400)
+		return
+	}
+	addr := strings.ToLower(strings.TrimSpace(req.Peer))
+	h := s.chat
+	h.mu.Lock()
+	ps := h.servers[chatServerKey(req.Server)]
+	enabled := ps != nil && h.enabled[ps.serverKey]
+	h.mu.Unlock()
+	if ps == nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "chat_err_disabled"})
+		return
+	}
+	if !enabled {
+		// Must be on first — switching would publish the identity there.
+		writeJSON(w, map[string]any{"ok": false, "error": "chat_err_server_off"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	reg, err := ps.client.IsRegistered(ctx, peer)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": chatStatusKey(err)})
+		return
+	}
+	if !reg {
+		writeJSON(w, map[string]any{"ok": false, "error": "chat_err_peer_not_on_server"})
+		return
+	}
+
+	h.mu.Lock()
+	th := h.threads[addr]
+	if th == nil {
+		th = &chatThreadFile{}
+		h.threads[addr] = th
+	}
+	th.Server = ps.serverKey
+	th.ServerSetAt = time.Now().Unix()
+	h.saveThreadsLocked()
+	h.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true, "server": ps.serverKey})
 }
 
 // handleChatPoll fetches the inbox now, with download progress over SSE.
