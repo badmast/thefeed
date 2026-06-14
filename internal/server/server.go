@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ecdh"
 	"fmt"
 	"log"
 	"os"
@@ -196,6 +197,14 @@ func (s *Server) Run(ctx context.Context) error {
 			chat = NewChatService(store, ek, queryKey, limits, s.cfg.ChatDomains)
 			s.feed.SetChatInfoPayload(protocol.EncodeChatInfo(chat.Info()))
 			go chat.RunSweeper(ctx)
+			// Periodic ek rotation: persist the new key, then re-sign/publish
+			// ChatInfo so clients adopt it. Limits the blast radius of an ek
+			// compromise to one rotation window (forward secrecy at that grain).
+			dataDir := s.cfg.DataDir
+			chat.SetEkPersist(func(k *ecdh.PrivateKey) error { return SaveServerEncKey(dataDir, k) })
+			go chat.RunEkRotation(ctx, func() {
+				s.feed.SetChatInfoPayload(protocol.EncodeChatInfo(chat.Info()))
+			})
 			acctTTL := "never"
 			if s.cfg.ChatAccountTTLDays > 0 {
 				acctTTL = fmt.Sprintf("%dd", s.cfg.ChatAccountTTLDays)

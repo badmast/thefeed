@@ -29,7 +29,7 @@ func TestChatCellUniformLengthAndRoundTrip(t *testing.T) {
 	plaintexts := [][]byte{
 		BuildChatStatusPlain(),
 		BuildChatFetchPlain([ChatPeerHandleSize]byte{1, 2, 3, 4}, 0x01020304, 7),
-		BuildChatAckPlain([ChatPeerHandleSize]byte{1, 2, 3, 4}, 0xAABBCC),
+		BuildChatAckPlain([ChatPeerHandleSize]byte{1, 2, 3, 4}, 0xAABBCC, [ChatReceiptMACSize]byte{1, 2, 3, 4, 5, 6}),
 		BuildChatSendStatusPlain([AddressSize]byte{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2}),
 		BuildChatKeyFetchPlain([AddressSize]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}),
 		BuildChatSendStartPlain([AddressSize]byte{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24}, 500),
@@ -67,6 +67,90 @@ func TestChatCellUniformLengthAndRoundTrip(t *testing.T) {
 		if !bytes.Equal(opened[:len(pt)], pt) {
 			t.Fatalf("op %d plaintext mismatch", i)
 		}
+	}
+}
+
+// TestChatCellVariableBudget: a cell round-trips at any budget B, the query
+// name shrinks as B shrinks (the whole point — RFC §8.2), and out-of-range
+// budgets are rejected.
+func TestChatCellVariableBudget(t *testing.T) {
+	var ks [KeySize]byte
+	ks[1] = 7
+	sel := [chatSelectorSize]byte{0x12, 0x34, 0x56}
+	pt := BuildChatStatusPlain() // 1 byte — fits even the smallest budget
+
+	prevLabel := 0
+	for bi, budget := range []int{ChatCellPlainMax, ChatCellPlainSize, ChatCellPlainMin} { // 21, 15, 6
+		counter := uint32(bi)
+		payload, err := SealChatCellPayloadN(ks, sel, counter, pt, budget)
+		if err != nil {
+			t.Fatalf("seal B=%d: %v", budget, err)
+		}
+		if len(payload) != budget+ChatSealTagSize {
+			t.Fatalf("B=%d: payload %d, want %d", budget, len(payload), budget+ChatSealTagSize)
+		}
+		qn, err := EncodeChatCell(chatTestQK, QuerySingleLabel, sel, counter, payload, chatTestDomain)
+		if err != nil {
+			t.Fatalf("encode B=%d: %v", budget, err)
+		}
+		label := qn[:strings.IndexByte(qn, '.')]
+		if prevLabel != 0 && len(label) >= prevLabel {
+			t.Fatalf("B=%d label %d not shorter than previous %d", budget, len(label), prevLabel)
+		}
+		prevLabel = len(label)
+		s, c, p, err := DecodeChatCell(chatTestQK, qn, chatTestDomain)
+		if err != nil || s != sel || c != counter {
+			t.Fatalf("decode B=%d: %v", budget, err)
+		}
+		opened, err := OpenChatCellPayload(ks, s, c, p)
+		if err != nil {
+			t.Fatalf("open B=%d: %v", budget, err)
+		}
+		if !bytes.Equal(opened[:len(pt)], pt) {
+			t.Fatalf("B=%d plaintext mismatch", budget)
+		}
+	}
+	if _, err := SealChatCellPayloadN(ks, sel, 0, pt, ChatCellPlainMin-1); err == nil {
+		t.Fatal("budget below min should fail")
+	}
+	if _, err := SealChatCellPayloadN(ks, sel, 0, pt, ChatCellPlainMax+ChatJitterMax+1); err == nil {
+		t.Fatal("padded length above max+jitter should fail")
+	}
+}
+
+// TestChatCellJitter: jitter is deterministic per (selector, counter) — so a
+// retransmit reproduces the exact query name (cacheable) — in range, and varies
+// across cells (so lengths spread, not a single spike).
+func TestChatCellJitter(t *testing.T) {
+	var qk [KeySize]byte
+	qk[0] = 3
+	sel := [chatSelectorSize]byte{1, 2, 3}
+	seen := map[int]bool{}
+	for ctr := uint32(0); ctr < 256; ctr++ {
+		j := ChatCellJitter(qk, sel, ctr)
+		if j < 0 || j > ChatJitterMax {
+			t.Fatalf("jitter %d out of range at ctr %d", j, ctr)
+		}
+		if j2 := ChatCellJitter(qk, sel, ctr); j2 != j {
+			t.Fatalf("jitter not deterministic at ctr %d: %d vs %d", ctr, j, j2)
+		}
+		seen[j] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("jitter does not vary across cells: %v", seen)
+	}
+	// A different query key gives a different schedule (key-dependent).
+	var qk2 [KeySize]byte
+	qk2[0] = 9
+	diff := false
+	for ctr := uint32(0); ctr < 64; ctr++ {
+		if ChatCellJitter(qk, sel, ctr) != ChatCellJitter(qk2, sel, ctr) {
+			diff = true
+			break
+		}
+	}
+	if !diff {
+		t.Fatal("jitter independent of query key")
 	}
 }
 

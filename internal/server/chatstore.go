@@ -78,6 +78,9 @@ var chatAccountsBucket = []byte("chat_accounts")
 type chatPairState struct {
 	LastAccepted  uint32 `json:"acc"`
 	LastDelivered uint32 `json:"del"`
+	// Receipt is the recipient's E2E proof (ChatReceiptMAC) for LastDelivered,
+	// relayed verbatim to the sender. The server can neither forge nor read it.
+	Receipt []byte `json:"rcpt,omitempty"`
 }
 
 // chatInboxMsg is one stored message envelope awaiting fetch.
@@ -636,8 +639,10 @@ func (s *ChatStore) FetchBlock(addr, src [protocol.AddressSize]byte, seq uint32,
 }
 
 // Ack frees delivered messages: removes peer→addr messages with seq ≤ upToSeq
-// and bumps last_delivered. Idempotent (the cell seal authenticated the caller).
-func (s *ChatStore) Ack(addr, peer [protocol.AddressSize]byte, upToSeq uint32, now time.Time) (status byte, err error) {
+// and bumps last_delivered. receipt is the recipient's opaque E2E proof for
+// upToSeq (stored verbatim, relayed to the sender via PairState). Idempotent
+// (the cell seal authenticated the caller).
+func (s *ChatStore) Ack(addr, peer [protocol.AddressSize]byte, upToSeq uint32, receipt []byte, now time.Time) (status byte, err error) {
 	sh := s.shardFor(addr)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -665,8 +670,12 @@ func (s *ChatStore) Ack(addr, peer [protocol.AddressSize]byte, upToSeq uint32, n
 		pair = &chatPairState{}
 		acc.Pairs[pairKeyOf(peer)] = pair
 	}
-	if upToSeq > pair.LastDelivered {
+	// Advance the watermark and its proof together; never downgrade on a stale
+	// re-ack (a lower upToSeq), so the sender can't be tricked into a regressed
+	// ✓✓. A re-ack at the same seq refreshes the receipt (idempotent).
+	if upToSeq >= pair.LastDelivered {
 		pair.LastDelivered = upToSeq
+		pair.Receipt = append(pair.Receipt[:0], receipt...)
 	}
 	acc.LastActive = now.Unix()
 	if err := s.putLocked(now, map[[protocol.AddressSize]byte]*chatAccount{addr: acc}); err != nil {
@@ -675,19 +684,23 @@ func (s *ChatStore) Ack(addr, peer [protocol.AddressSize]byte, upToSeq uint32, n
 	return protocol.ChatStatusOK, nil
 }
 
-// PairState returns (last_accepted, last_delivered) for messages owner←peer.
-func (s *ChatStore) PairState(owner, peer [protocol.AddressSize]byte, now time.Time) (accepted, delivered uint32, ok bool, err error) {
+// PairState returns (last_accepted, last_delivered, receipt) for messages
+// owner←peer. receipt is the recipient's E2E proof for last_delivered (nil if
+// none yet), relayed to the sender for offline verification.
+func (s *ChatStore) PairState(owner, peer [protocol.AddressSize]byte, now time.Time) (accepted, delivered uint32, receipt []byte, ok bool, err error) {
 	sh := s.shardFor(owner)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	acc, err := s.loadLocked(owner, now)
 	if err != nil || acc == nil {
-		return 0, 0, false, err
+		return 0, 0, nil, false, err
 	}
 	if p := acc.Pairs[pairKeyOf(peer)]; p != nil {
-		return p.LastAccepted, p.LastDelivered, true, nil
+		// Copy the receipt: the caller uses it after this shard lock is released,
+		// concurrently with an Ack that may rewrite the stored slice in place.
+		return p.LastAccepted, p.LastDelivered, append([]byte(nil), p.Receipt...), true, nil
 	}
-	return 0, 0, true, nil
+	return 0, 0, nil, true, nil
 }
 
 // ResolvePeerHandle maps a 4-byte peer handle to a full peer address within

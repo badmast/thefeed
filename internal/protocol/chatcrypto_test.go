@@ -145,6 +145,48 @@ func TestChatContentKeySymmetric(t *testing.T) {
 	}
 }
 
+func TestChatReceiptMAC(t *testing.T) {
+	a := newChatParty(t) // message sender
+	b := newChatParty(t) // recipient, signs the receipt
+
+	// Both ends derive the same pair receipt key from their static ECDH.
+	ka, err := ChatReceiptKey(a.enc, b.encPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := ChatReceiptKey(b.enc, a.encPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ka != kb {
+		t.Fatal("receipt key not symmetric")
+	}
+
+	// B signs delivery of a→b up to seq 5; A recomputes the same tuple.
+	rcpt := ChatReceiptMAC(kb, a.addr, b.addr, 5)
+	if rcpt != ChatReceiptMAC(ka, a.addr, b.addr, 5) {
+		t.Fatal("receipt does not verify across the two ends")
+	}
+	// Bound to seq: a higher watermark can't reuse a lower one's proof.
+	if ChatReceiptMAC(ka, a.addr, b.addr, 6) == rcpt {
+		t.Fatal("receipt not bound to seq")
+	}
+	// Bound to direction: can't be reflected onto the reverse pair.
+	if ChatReceiptMAC(ka, b.addr, a.addr, 5) == rcpt {
+		t.Fatal("receipt not bound to direction")
+	}
+	// Unforgeable by a third party (no pair key): this is what stops a malicious
+	// server from fabricating a ✓✓.
+	c := newChatParty(t)
+	kc, err := ChatReceiptKey(c.enc, a.encPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ChatReceiptMAC(kc, a.addr, b.addr, 5) == rcpt {
+		t.Fatal("receipt forgeable without the pair key")
+	}
+}
+
 func TestChatServerSharedKeySymmetric(t *testing.T) {
 	client := newChatParty(t)
 	ek, err := GenerateEphemeralKey()

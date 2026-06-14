@@ -202,6 +202,21 @@ func SerializeMetadata(m *Metadata) []byte {
 	return buf
 }
 
+// ChatAvailableFromBlock0 reads the ChatAvailable advertisement (flags bit
+// 0x02) from metadata block 0 alone — no need to fetch or verify the rest of the
+// metadata. The flags byte sits at a fixed offset (marker+timestamp+nextFetch)
+// in every metadata format, so block 0 is enough. ok is false if block 0 is too
+// short to contain it. This is an optimization hint only: it lets a client skip
+// the (retry-prone) ChatInfo probe on a server that advertises no messenger; the
+// authoritative, signed capability check is still ChatInfo.
+func ChatAvailableFromBlock0(block0 []byte) (available, ok bool) {
+	const flagsOff = MarkerSize + 4 + 4 // marker(3) + timestamp(4) + nextFetch(4)
+	if len(block0) <= flagsOff {
+		return false, false
+	}
+	return block0[flagsOff]&0x02 != 0, true
+}
+
 // ParseMetadata decodes metadata from concatenated channel 0 block data.
 //
 // New servers may embed an extended header in the Marker + Timestamp

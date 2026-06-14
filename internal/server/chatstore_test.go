@@ -222,20 +222,20 @@ func TestChatStoreInboxFetchAck(t *testing.T) {
 	}
 
 	// ACK frees it and bumps delivered.
-	if st, _ := s.Ack(b.addr, a.addr, 1, now); st != protocol.ChatStatusOK {
+	if st, _ := s.Ack(b.addr, a.addr, 1, nil, now); st != protocol.ChatStatusOK {
 		t.Fatal("ack failed")
 	}
 	entries, _ = s.InboxStatus(b.addr, now)
 	if len(entries) != 0 {
 		t.Fatal("inbox not freed after ack")
 	}
-	acc, del, ok, _ := s.PairState(b.addr, a.addr, now)
+	acc, del, _, ok, _ := s.PairState(b.addr, a.addr, now)
 	if !ok || acc != 1 || del != 1 {
 		t.Fatalf("pair state = (%d,%d), want (1,1)", acc, del)
 	}
 
 	// ACK is idempotent (the seal authenticates; replaying is harmless).
-	if st, _ := s.Ack(b.addr, a.addr, 1, now); st != protocol.ChatStatusOK {
+	if st, _ := s.Ack(b.addr, a.addr, 1, nil, now); st != protocol.ChatStatusOK {
 		t.Fatal("repeated ack should be idempotent OK")
 	}
 
@@ -328,7 +328,7 @@ func TestChatStorePeriodicModePersistence(t *testing.T) {
 	if st, _, _, _, _ := s1.CommitMessage(a.addr, b.addr, 3, []byte("ram only"), now); st != protocol.ChatStatusOK {
 		t.Fatal("commit failed")
 	}
-	if st, _ := s1.Ack(b.addr, a.addr, 0, now); st != protocol.ChatStatusOK {
+	if st, _ := s1.Ack(b.addr, a.addr, 0, nil, now); st != protocol.ChatStatusOK {
 		t.Fatal("ack failed")
 	}
 	s1.Close()
@@ -348,7 +348,7 @@ func TestChatStorePeriodicModePersistence(t *testing.T) {
 	if len(entries) != 1 || entries[0].Seq != 3 {
 		t.Fatalf("inbox after reopen: %+v", entries)
 	}
-	acc, del, _, _ := s2.PairState(b.addr, a.addr, now)
+	acc, del, _, _, _ := s2.PairState(b.addr, a.addr, now)
 	if acc != 3 || del != 0 {
 		t.Fatalf("pair state after reopen: acc=%d del=%d", acc, del)
 	}

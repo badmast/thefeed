@@ -39,6 +39,11 @@ const (
 	// ChatChunkMACSize is the truncated HMAC length authenticating one
 	// upload chunk to the session.
 	ChatChunkMACSize = 4
+	// ChatReceiptMACSize is the truncated HMAC length of an end-to-end delivery
+	// receipt. 6 bytes keeps the ACK and SEND_STATUS response in one cell, and
+	// the MAC is verified offline by the sender (no online forgery oracle), so a
+	// malicious server still cannot fabricate a ✓✓ — only withhold a real one.
+	ChatReceiptMACSize = 6
 )
 
 // HKDF domain-separation labels for chat key derivation.
@@ -50,6 +55,8 @@ const (
 	chatRoutingInfo  = "thefeed-chat-routing-v1"
 	chatChunkMACInfo = "thefeed-chat-chunkmac-v1"
 	chatSrvMACInfo   = "thefeed-chat-srvmac-v1"
+	chatReceiptInfo  = "thefeed-chat-receipt-v1"    // HKDF label for the pair receipt key
+	chatReceiptMAC   = "thefeed-chat-receiptmac-v1" // domain prefix inside the receipt MAC
 )
 
 // GenerateSeed returns a new random chat identity seed.
@@ -173,6 +180,33 @@ func ChatServerMAC(kss [KeySize]byte, src, dst [AddressSize]byte, seq uint32, ci
 	ctSum := sha256.Sum256(ciphertext)
 	h.Write(ctSum[:])
 	var out [ChatSrvMACSize]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// ChatReceiptKey derives the pair key that authenticates delivery receipts.
+// Like ChatContentKey it comes from the two peers' static ECDH — so only the
+// two ends can compute it, never the relaying server — but it is independent of
+// any single message (no seq), so one key covers the whole conversation. The
+// recipient signs its ACK watermark with it; the sender verifies, turning ✓✓
+// from a server claim into a fact the server cannot forge.
+func ChatReceiptKey(own *ecdh.PrivateKey, peerEncPub []byte) ([KeySize]byte, error) {
+	return ecdhDerive(own, peerEncPub, keyInfo(chatReceiptInfo))
+}
+
+// ChatReceiptMAC is the recipient's proof that it acknowledged sender→recipient
+// messages up to upToSeq. The (sender, recipient) order is fixed by the message
+// direction (originator first), so both ends bind the same tuple and a receipt
+// can't be reflected onto the reverse direction.
+func ChatReceiptMAC(receiptKey [KeySize]byte, sender, recipient [AddressSize]byte, upToSeq uint32) [ChatReceiptMACSize]byte {
+	h := hmac.New(sha256.New, receiptKey[:])
+	h.Write([]byte(chatReceiptMAC))
+	h.Write(sender[:])
+	h.Write(recipient[:])
+	var seqB [4]byte
+	binary.BigEndian.PutUint32(seqB[:], upToSeq)
+	h.Write(seqB[:])
+	var out [ChatReceiptMACSize]byte
 	copy(out[:], h.Sum(nil))
 	return out
 }

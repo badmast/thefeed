@@ -22,13 +22,15 @@ import (
 // bounded; accounts/inboxes live in the ChatStore.
 type ChatService struct {
 	store    *ChatStore
-	ek       *ecdh.PrivateKey
-	ekPub    []byte
 	queryKey [protocol.KeySize]byte
 	limits   protocol.ChatLimits
 	domains  []string
 
 	mu         sync.Mutex
+	ek         *ecdh.PrivateKey // current session/encryption key
+	ekPub      []byte
+	prevEks    []*chatEk // rotated-out keys still inside their grace window
+	ekSave     func(*ecdh.PrivateKey) error
 	sessions   map[[protocol.ChatSelectorSize]byte]*chatSession
 	handshakes map[[protocol.ChatSelectorSize]byte]*chatHandshake
 	perAccount map[[protocol.AddressSize]byte]int
@@ -45,12 +47,34 @@ type chatSession struct {
 	created  time.Time
 	lastSeen time.Time
 	upload   *chatUpload
+	frag     *chatFragReasm // in-flight OP_FRAG reassembly (one op at a time)
+}
+
+// chatFragReasm reassembles one oversized control op split across OP_FRAG cells.
+// The client serializes fragmented ops (fragMu), so one buffer per session is
+// enough.
+type chatFragReasm struct {
+	total int
+	reasm *protocol.ChunkReassembler
+}
+
+// chatEk is a rotated-out server encryption key kept until retireAt so a client
+// whose cached (signed) ChatInfo still names the old key can finish a handshake.
+// Past retireAt it is dropped — and with it the ability to recompute any session
+// key derived from it, giving the session layer forward secrecy at the rotation
+// granularity. Live sessions are unaffected: their Ksession is derived once at
+// handshake and cached on the session.
+type chatEk struct {
+	priv     *ecdh.PrivateKey
+	pub      []byte
+	retireAt time.Time
 }
 
 type chatUpload struct {
-	dst      [protocol.AddressSize]byte
-	totalLen int
-	reasm    *protocol.ChunkReassembler
+	dst       [protocol.AddressSize]byte
+	totalLen  int
+	chunkSize int // body bytes per DATA cell (client budget B - 2), fixed for the upload
+	reasm     *protocol.ChunkReassembler
 }
 
 type chatHandshake struct {
@@ -69,7 +93,36 @@ const (
 	// chatEnvelopeOverhead bounds a SEND_START total length headroom over the
 	// configured max message bytes (ver+seq+gcm tag+srvmac+cflag, plus slack).
 	chatEnvelopeOverhead = 48
+
+	// chatEkRotatePeriod is how often the server rotates its session/encryption
+	// key, and chatEkGrace how long the rotated-out key keeps completing
+	// handshakes. Grace exceeds the period (and dwarfs the ~1h client ChatInfo
+	// refresh) so no client is ever locked out across a rotation; past grace the
+	// old private key is dropped, giving the session layer forward secrecy.
+	chatEkRotatePeriod = 7 * 24 * time.Hour
+	chatEkGrace        = 8 * 24 * time.Hour
 )
+
+// RunEkRotation rotates the server encryption key on chatEkRotatePeriod, then
+// re-publishes (re-signs) ChatInfo so clients learn the new key. Runs until ctx
+// is done.
+func (c *ChatService) RunEkRotation(ctx context.Context, republish func()) {
+	t := time.NewTicker(chatEkRotatePeriod)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := c.RotateEk(time.Now(), chatEkGrace); err != nil {
+				log.Printf("[chat] ek rotation failed: %v", err)
+				continue
+			}
+			republish()
+			log.Printf("[chat] rotated server encryption key")
+		}
+	}
+}
 
 // NewChatService creates the chat handler. domains are the dedicated chat
 // sub-domains (already validated against feed domains by the DNS layer).
@@ -91,16 +144,68 @@ func NewChatService(store *ChatStore, ek *ecdh.PrivateKey, queryKey [protocol.Ke
 func (c *ChatService) Domains() []string { return c.domains }
 
 // Info returns the ChatInfo payload advertised (signed) on the feed metadata
-// path.
+// path. EkPub is the current key; on rotation the caller re-publishes Info().
 func (c *ChatService) Info() protocol.ChatInfo {
+	c.mu.Lock()
+	ekPub := append([]byte(nil), c.ekPub...)
+	c.mu.Unlock()
 	return protocol.ChatInfo{
 		MinVersion: protocol.ChatProtocolVersion,
 		MaxVersion: protocol.ChatProtocolVersion,
 		Enabled:    true,
 		Domains:    c.domains,
-		EkPub:      c.ekPub,
+		EkPub:      ekPub,
 		Limits:     c.limits,
 	}
+}
+
+// SetEkPersist registers how a freshly rotated current key is saved to disk, so
+// a restart loads the new key (not the pre-rotation one). Optional — tests leave
+// it nil and rotate in RAM only.
+func (c *ChatService) SetEkPersist(save func(*ecdh.PrivateKey) error) {
+	c.mu.Lock()
+	c.ekSave = save
+	c.mu.Unlock()
+}
+
+// ekCandidatesLocked returns the keys a handshake may have used — current first,
+// then any previous key still inside its grace window — and prunes the expired
+// ones (dropping their private keys for forward secrecy). Caller holds mu.
+func (c *ChatService) ekCandidatesLocked(now time.Time) []*chatEk {
+	kept := c.prevEks[:0]
+	for _, e := range c.prevEks {
+		if now.Before(e.retireAt) {
+			kept = append(kept, e)
+		}
+	}
+	c.prevEks = kept
+	out := make([]*chatEk, 0, 1+len(kept))
+	out = append(out, &chatEk{priv: c.ek, pub: c.ekPub})
+	return append(out, kept...)
+}
+
+// RotateEk swaps in a fresh current key, retires the old one into the grace
+// window, persists the new key (if a saver is set), and returns the new public
+// key so the caller can re-publish (re-sign) ChatInfo. Live sessions keep
+// working; clients pick up the new key on their next ChatInfo refresh.
+func (c *ChatService) RotateEk(now time.Time, grace time.Duration) ([]byte, error) {
+	newKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.ekCandidatesLocked(now) // prune expired before retiring the old one
+	c.prevEks = append(c.prevEks, &chatEk{priv: c.ek, pub: c.ekPub, retireAt: now.Add(grace)})
+	c.ek, c.ekPub = newKey, newKey.PublicKey().Bytes()
+	save := c.ekSave
+	pub := append([]byte(nil), c.ekPub...)
+	c.mu.Unlock()
+	if save != nil {
+		if err := save(newKey); err != nil {
+			return pub, err
+		}
+	}
+	return pub, nil
 }
 
 // RunSweeper periodically expires sessions, handshakes, old messages, and idle
@@ -256,13 +361,33 @@ func (c *ChatService) completeHandshake(setupTag [protocol.ChatSelectorSize]byte
 	if protoVer != protocol.ChatProtocolVersion {
 		return []byte{}
 	}
-	ksession, err := protocol.ChatSessionKey(c.ek, ephPub, protoVer, c.queryKey)
-	if err != nil {
-		return []byte{}
+	// Try the current key first, then any previous key still inside its grace
+	// window (a client whose cached signed ChatInfo predates a rotation seals its
+	// bootstrap to the old ek).
+	c.mu.Lock()
+	cands := c.ekCandidatesLocked(now)
+	c.mu.Unlock()
+	var (
+		ekPriv   *ecdh.PrivateKey
+		ekPub    []byte
+		ksession [protocol.KeySize]byte
+		boot     []byte
+	)
+	for _, e := range cands {
+		ks, derr := protocol.ChatSessionKey(e.priv, ephPub, protoVer, c.queryKey)
+		if derr != nil {
+			continue
+		}
+		b, oerr := protocol.OpenChat(ks, setupTag[:], protocol.ChatBootstrapCounter(), sealedBoot)
+		if oerr != nil {
+			continue
+		}
+		ekPriv, ekPub, ksession, boot = e.priv, e.pub, ks, b
+		break
 	}
-	boot, err := protocol.OpenChat(ksession, setupTag[:], protocol.ChatBootstrapCounter(), sealedBoot)
-	if err != nil {
-		// Wrong passphrase or corrupt — looks like a non-chat query; drop.
+	if ekPriv == nil {
+		// No key opened it — wrong passphrase or corrupt; looks like a non-chat
+		// query; drop.
 		return []byte{}
 	}
 
@@ -305,7 +430,7 @@ func (c *ChatService) completeHandshake(setupTag [protocol.ChatSelectorSize]byte
 		if !ok {
 			return hsResp(protocol.ChatStatusUnknownSender, nil)
 		}
-		kss, kerr := protocol.ChatServerSharedKey(c.ek, encPub, encPub, c.ekPub)
+		kss, kerr := protocol.ChatServerSharedKey(ekPriv, encPub, encPub, ekPub)
 		if kerr != nil {
 			return hsResp(protocol.ChatStatusBadRequest, nil)
 		}
@@ -370,6 +495,24 @@ func (c *ChatService) handleInContext(sess *chatSession, selector [protocol.Chat
 		return protocol.SealChatResponse(sess.ksession, selector, counter, status, body)
 	}
 
+	// Recover the per-cell budget B = plaintext length minus the deterministic
+	// jitter the client folded in (RFC §8.2). OP_FRAG cells carry no jitter (its
+	// chunk is concatenated, so trailing pad can't ride along). Reject anything
+	// whose recovered budget is out of range. SendStart/Data read the chunk size
+	// as B-2 from this.
+	budget := len(pt)
+	if protocol.ChatPlainOp(pt) != protocol.ChatOpFrag {
+		budget -= protocol.ChatCellJitter(c.queryKey, selector, counter)
+	}
+	if budget < protocol.ChatCellPlainMin || budget > protocol.ChatCellPlainMax {
+		return resp(protocol.ChatStatusBadRequest, nil)
+	}
+	return c.dispatch(sess, pt, budget, resp, now)
+}
+
+// dispatch routes one decoded op plaintext to its handler. Called directly with
+// each cell's plaintext, and re-entered from opFrag with a reassembled op.
+func (c *ChatService) dispatch(sess *chatSession, pt []byte, budget int, resp func(byte, []byte) []byte, now time.Time) []byte {
 	switch protocol.ChatPlainOp(pt) {
 	case protocol.ChatOpStatus:
 		return c.opStatus(sess, resp, now)
@@ -382,11 +525,13 @@ func (c *ChatService) handleInContext(sess *chatSession, selector [protocol.Chat
 	case protocol.ChatOpKeyFetch:
 		return c.opKeyFetch(pt, resp, now)
 	case protocol.ChatOpSendStart:
-		return c.opSendStart(sess, pt, resp, now)
+		return c.opSendStart(sess, pt, budget, resp, now)
 	case protocol.ChatOpData:
 		return c.opData(sess, pt, resp)
 	case protocol.ChatOpFin:
 		return c.opFin(sess, pt, resp, now)
+	case protocol.ChatOpFrag:
+		return c.opFrag(sess, pt, budget, resp, now)
 	default:
 		return resp(protocol.ChatStatusBadRequest, nil)
 	}
@@ -454,7 +599,7 @@ func (c *ChatService) opAck(sess *chatSession, pt []byte, resp func(byte, []byte
 	if !ok {
 		return resp(protocol.ChatStatusNotFound, nil)
 	}
-	status, err := c.store.Ack(sess.account, peer, a.UpToSeq, now)
+	status, err := c.store.Ack(sess.account, peer, a.UpToSeq, a.Receipt[:], now)
 	if err != nil {
 		return resp(protocol.ChatStatusBusy, nil)
 	}
@@ -467,16 +612,20 @@ func (c *ChatService) opSendStatus(sess *chatSession, pt []byte, resp func(byte,
 		return resp(protocol.ChatStatusBadRequest, nil)
 	}
 	// Caller is the sender; counters live in the recipient's account.
-	accepted, delivered, ok, err := c.store.PairState(s.Peer, sess.account, now)
+	accepted, delivered, receipt, ok, err := c.store.PairState(s.Peer, sess.account, now)
 	if err != nil {
 		return resp(protocol.ChatStatusBusy, nil)
 	}
 	if !ok {
 		return resp(protocol.ChatStatusNotFound, nil)
 	}
-	body := make([]byte, 8)
+	// accepted(4) ‖ delivered(4) ‖ receipt(6) = 14 ≤ one cell. The receipt is
+	// the recipient's E2E proof of `delivered`; the server relays it untouched
+	// (it can't forge one). Zero-pad when absent so the layout stays fixed.
+	body := make([]byte, 8+protocol.ChatReceiptMACSize)
 	binary.BigEndian.PutUint32(body, accepted)
 	binary.BigEndian.PutUint32(body[4:], delivered)
+	copy(body[8:], receipt)
 	return resp(protocol.ChatStatusOK, body)
 }
 
@@ -495,7 +644,42 @@ func (c *ChatService) opKeyFetch(pt []byte, resp func(byte, []byte) []byte, now 
 	return resp(protocol.ChatStatusOK, rec)
 }
 
-func (c *ChatService) opSendStart(sess *chatSession, pt []byte, resp func(byte, []byte) []byte, now time.Time) []byte {
+// opFrag accumulates one OP_FRAG cell; once the whole op has arrived it
+// reassembles and dispatches it with the cell budget (so an upload's chunk size
+// comes from the cell, not the reassembled SEND_START length).
+func (c *ChatService) opFrag(sess *chatSession, pt []byte, budget int, resp func(byte, []byte) []byte, now time.Time) []byte {
+	f, err := protocol.ParseChatFragPlain(pt)
+	if err != nil {
+		return resp(protocol.ChatStatusBadRequest, nil)
+	}
+	total := int(f.Total)
+	if total < 1 || int(f.Index) >= total {
+		return resp(protocol.ChatStatusBadRequest, nil)
+	}
+	c.mu.Lock()
+	if sess.frag == nil || sess.frag.total != total {
+		sess.frag = &chatFragReasm{total: total, reasm: protocol.NewChunkReassembler(total)}
+	}
+	sess.frag.reasm.Add(int(f.Index), f.Chunk)
+	complete := sess.frag.reasm.Complete()
+	var assembled []byte
+	if complete {
+		assembled = sess.frag.reasm.Assemble()
+		sess.frag = nil
+	}
+	c.mu.Unlock()
+	if !complete {
+		return resp(protocol.ChatStatusFragMore, nil)
+	}
+	// The inner op is fixed-length and self-delimiting, so trailing seal pad in
+	// the last fragment is ignored. A fragment-of-a-fragment is rejected.
+	if protocol.ChatPlainOp(assembled) == protocol.ChatOpFrag {
+		return resp(protocol.ChatStatusBadRequest, nil)
+	}
+	return c.dispatch(sess, assembled, budget, resp, now)
+}
+
+func (c *ChatService) opSendStart(sess *chatSession, pt []byte, budget int, resp func(byte, []byte) []byte, now time.Time) []byte {
 	ss, err := protocol.ParseChatSendStartPlain(pt)
 	if err != nil {
 		return resp(protocol.ChatStatusBadRequest, nil)
@@ -511,7 +695,11 @@ func (c *ChatService) opSendStart(sess *chatSession, pt []byte, resp func(byte, 
 	if status != protocol.ChatStatusOK {
 		return resp(status, appendQuota(nil, remaining, reset))
 	}
-	chunks := (int(ss.TotalLen) + protocol.ChatDataChunkSize - 1) / protocol.ChatDataChunkSize
+	// Chunk size is the client's budget B-2. budget is the CELL length (passed by
+	// dispatch), not len(pt): a fragmented SEND_START reassembles to 15 bytes but
+	// its DATA cells are still at the small budget.
+	chunkSize := budget - 2
+	chunks := (int(ss.TotalLen) + chunkSize - 1) / chunkSize
 	if chunks < 1 || chunks > 255 {
 		return resp(protocol.ChatStatusBadRequest, nil)
 	}
@@ -519,7 +707,7 @@ func (c *ChatService) opSendStart(sess *chatSession, pt []byte, resp func(byte, 
 	// Resume the same in-progress message (same dst+len) so a retry skips
 	// already-received chunks; a new session or different message starts fresh.
 	if sess.upload == nil || sess.upload.dst != ss.Dst || sess.upload.totalLen != int(ss.TotalLen) {
-		sess.upload = &chatUpload{dst: ss.Dst, totalLen: int(ss.TotalLen), reasm: protocol.NewChunkReassembler(chunks)}
+		sess.upload = &chatUpload{dst: ss.Dst, totalLen: int(ss.TotalLen), chunkSize: chunkSize, reasm: protocol.NewChunkReassembler(chunks)}
 	}
 	bm := sess.upload.reasm.Bitmap()
 	c.mu.Unlock()
@@ -537,9 +725,9 @@ func (c *ChatService) opData(sess *chatSession, pt []byte, resp func(byte, []byt
 		c.mu.Unlock()
 		return resp(protocol.ChatStatusUnknownSession, nil)
 	}
-	realLen := up.totalLen - int(d.Index)*protocol.ChatDataChunkSize
-	if realLen > protocol.ChatDataChunkSize {
-		realLen = protocol.ChatDataChunkSize
+	realLen := up.totalLen - int(d.Index)*up.chunkSize
+	if realLen > up.chunkSize {
+		realLen = up.chunkSize
 	}
 	if realLen < 0 || realLen > len(d.Chunk) {
 		c.mu.Unlock()

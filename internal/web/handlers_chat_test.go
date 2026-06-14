@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sartoopjj/thefeed/internal/protocol"
 )
 
 func newChatTestServer(t *testing.T) *Server {
@@ -428,6 +430,81 @@ func TestChatAvailabilitySkipsBackedOffDisabled(t *testing.T) {
 	h.clearBackoffs()
 	if skip, _ := h.shouldSkipProbe(old, false, now); skip {
 		t.Fatal("clearBackoffs should re-arm every server for probing")
+	}
+}
+
+// TestChatReplayWatermark guards #2: an incoming seq at/below the acked
+// watermark (per server) is a replay and must be dropped, while a genuinely new
+// higher seq passes — and the watermark is per-server so the two never bleed.
+func TestChatReplayWatermark(t *testing.T) {
+	th := &chatThreadFile{}
+	const sv = "a.example.com"
+
+	// Nothing acked yet → nothing is a replay.
+	if th.replayedIn(sv, 1) {
+		t.Fatal("seq 1 flagged as replay before any ack")
+	}
+	if !th.markAckedIn(sv, 3) {
+		t.Fatal("first ack should move the watermark")
+	}
+	// Re-ack at/below the mark doesn't move it.
+	if th.markAckedIn(sv, 2) || th.markAckedIn(sv, 3) {
+		t.Fatal("watermark regressed or re-moved at/below current")
+	}
+	// seq ≤ 3 are replays; 4+ are new.
+	for _, seq := range []uint32{1, 2, 3} {
+		if !th.replayedIn(sv, seq) {
+			t.Fatalf("seq %d should be a replay (≤ watermark 3)", seq)
+		}
+	}
+	if th.replayedIn(sv, 4) {
+		t.Fatal("seq 4 should not be a replay")
+	}
+	// A different server has its own watermark.
+	if th.replayedIn("b.example.com", 1) {
+		t.Fatal("watermark leaked across servers")
+	}
+}
+
+// TestChatSettingsPreset: the cell-size preset is applied, persisted, and read
+// back; an unknown preset is rejected.
+func TestChatSettingsPreset(t *testing.T) {
+	s := newChatTestServer(t)
+	if s.chat.budget != protocol.ChatCellPlainSize {
+		t.Fatalf("default budget = %d, want Standard", s.chat.budget)
+	}
+
+	post := func(body string) int {
+		w := httptest.NewRecorder()
+		s.handleChatSettings(w, httptest.NewRequest(http.MethodPost, "/api/chat/settings", strings.NewReader(body)))
+		return w.Code
+	}
+	if code := post(`{"preset":"compact"}`); code != 200 {
+		t.Fatalf("post compact = %d", code)
+	}
+	if s.chat.budget != chatBudgetPresets["compact"] {
+		t.Fatalf("budget not applied: %d", s.chat.budget)
+	}
+	// Persisted across a reload.
+	if h2 := newChatHub(s, s.dataDir); h2.budget != chatBudgetPresets["compact"] {
+		t.Fatalf("budget not persisted: %d", h2.budget)
+	}
+	// GET reflects it.
+	w := httptest.NewRecorder()
+	s.handleChatSettings(w, httptest.NewRequest(http.MethodGet, "/api/chat/settings", nil))
+	var got struct {
+		Budget int    `json:"budget"`
+		Preset string `json:"preset"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Preset != "compact" || got.Budget != chatBudgetPresets["compact"] {
+		t.Fatalf("get = %+v", got)
+	}
+	// Unknown preset rejected.
+	if code := post(`{"preset":"huge"}`); code != 400 {
+		t.Fatalf("unknown preset = %d, want 400", code)
 	}
 }
 

@@ -103,6 +103,19 @@ func LoadOrCreateServerEncKey(dataDir string) (*ecdh.PrivateKey, error) {
 	return key, nil
 }
 
+// SaveServerEncKey overwrites the persisted x25519 chat key. Used on ek
+// rotation so a restart loads the rotated key, not the pre-rotation one. The
+// previous key lives on only in RAM (its grace window), which is what gives the
+// session layer forward secrecy once it expires.
+func SaveServerEncKey(dataDir string, key *ecdh.PrivateKey) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	path := filepath.Join(dataDir, serverEncKeyFile)
+	enc := base64.StdEncoding.EncodeToString(key.Bytes())
+	return os.WriteFile(path, []byte(enc+"\n"), 0o600)
+}
+
 // ServerPublicKeyString returns the base64url (no padding) encoding of the
 // server public key — the value pinned in configs and bundled defaults.
 func ServerPublicKeyString(priv ed25519.PrivateKey) string {

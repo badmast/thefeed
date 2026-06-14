@@ -949,6 +949,18 @@
   line-height: 1.5
 }
 
+/* live success score shown next to each mode in auto cell-size mode */
+.chat-score {
+  display: inline-block;
+  margin-inline-start: 8px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent, var(--text));
+  background: color-mix(in srgb, var(--accent, #888) 16%, transparent)
+}
+
 /* warning shown at the top of the server picker (e.g. "contact isn't here") */
 .chat-sheet-warn {
   font-size: 12px;

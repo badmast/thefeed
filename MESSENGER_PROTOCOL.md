@@ -41,7 +41,7 @@ Domains shown as `chat.example.com` are placeholders.
 - Hiding *metadata from the server*: the server necessarily learns the routing
   pair (sender address → recipient address), message sizes, and timing. See §13.
 - Forward secrecy of message content (the pair content key is derived from
-  long-term identity keys; see Open Questions §15).
+  long-term identity keys; a deliberate trade-off, see §15-2).
 - Group chat, multi-device sync, voice/media. One-to-one text only.
 - Hiding *that DNS is being used* from a network observer who can see the
   destination domain.
@@ -54,13 +54,13 @@ Domains shown as `chat.example.com` are placeholders.
 |-----------|---------------|---------------------------|
 | Passive resolver **without** the passphrase | Sees every query name + response | Cells are uniform, random labels; learns no framing, op, peer, counter, or content — chat is indistinguishable from other obfuscated feed traffic |
 | Passive resolver **with** the public passphrase | Also knows `query_key` | **Recovers the cell framing** (un-masks selector+counter) → can group cells by session, see the handshake top-bit and the cleartext `kind` byte (REGISTER vs AUTH), and traffic-analyze a multi-cell SEND vs a single-cell poll. In-context op **payloads stay sealed**, so the op/peer/read-metadata and content remain hidden. (So the masking is an obfuscation layer against a passphrase-ignorant censor, **not** a metadata shield against a passphrase holder.) |
-| Malicious/compromised server | Stores & routes all ciphertext, can drop/delay/reorder, can lie | Cannot read content; cannot substitute a peer's key (address = hash of identity key); cannot forge a delivery; cannot impersonate (per-op seal + pinned signing key) |
-| Active forger on the wire | Can inject DNS answers | Sealed responses fail closed; a forged 4-byte op tag costs ~2³² rate-limited online round-trips and only yields E2E ciphertext |
+| Malicious/compromised server | Stores & routes all ciphertext, can drop/delay/reorder, can lie | Cannot read content; cannot substitute a peer's key (address = hash of identity key); **cannot forge a ✓✓** (it carries a recipient-signed pair-MAC — §12) though it *can* withhold one; cannot impersonate (per-op seal + pinned signing key). A later `ek` compromise is bounded by rotation (§9) and never exposes content |
+| Active forger on the wire | Can inject DNS answers | Sealed responses fail closed; a forged 4-byte op tag costs ~2³² guesses, each a DNS round-trip, against per-**account** limits that the multi-domain spread does not multiply; only yields E2E ciphertext. The unauthenticated session-lost sentinel (`0xE5`) is injectable but its re-handshake is client-rate-limited (§10) |
 | Peer | A registered account you talk to | Standard E2E peer; cannot misattribute a message to a third party (content key binds src,dst,seq) |
 
 Explicit residual exposure to the **server**: routing pair, sizes, timing,
-social graph among accounts on that server. This is the cost of store-and-forward
-over a third-party relay; mitigations are an open question (§15).
+social graph among accounts on that server. This is the accepted cost of
+store-and-forward over a third-party relay (§15-5).
 
 ---
 
@@ -228,8 +228,101 @@ on its variable-length plaintext and streamed across 19-byte slabs (§9) — so 
 "fixed 15 bytes" applies to in-context cells, not to `SealChat` as such.
 
 The 4-byte tag is deliberately short: forging it requires ~2³² *online*,
-rate-limited DNS round-trips, and success only yields an E2E-encrypted payload.
-(Reviewers: is 4 bytes the right trade? §15.)
+rate-limited DNS round-trips, and success only yields an E2E-encrypted payload
+(rationale in §15-1).
+
+### 8.2 Configurable cell size
+
+> **Status:** implemented. The default (Standard) reproduces today's wire; the
+> knob adds Compact (blend) and Wide (speed).
+
+A chat query is bigger than a feed query (40 chars vs an observed 26–31) because
+it carries the whole sealed request, not just a block index — a length
+fingerprint a censor can read with no passphrase. The fix is to make the fixed
+**15-byte** op budget a parameter **`B`** (default **15**), trading query
+*length* against query *count*:
+
+```
+cell wire size = selector(3) + counter(3) + sealed(B) + tag(4) = 10 + B bytes
+base32 label   = ceil((10 + B) * 8 / 5) chars
+```
+
+| `B` | chars | preset / role |
+|----:|------:|---------------|
+| 6 | 26 | **Compact** — low end of the feed cloud |
+| 8 | 29 | Compact — center of a measured feed cloud |
+| **15** | **40** | **Standard** — today's default |
+| 21 | 48 | **Wide** — fewer queries, faster (a length spike) |
+
+Three properties make this safe with **no negotiation**:
+
+- **Self-describing.** `selector`/`counter` are fixed at the front and `tag` is
+  the last 4 bytes, so the server reads `B = label_bytes − 10` off each cell.
+  AES-CTR is length-agnostic and the mask HMAC already spans the whole payload,
+  so the seal is unchanged.
+- **Per-client, not end-to-end.** `B` only governs how *one* client chunks a
+  message *to the server*; the message envelope is identical at any `B`, so two
+  peers interoperate at different `B` (one uploads Wide, the other fetches
+  Compact).
+- **Version-scoped, client-chosen.** The valid range is a property of the
+  protocol version — **v1: `B ∈ [6, 21]`** (floor = framing overhead, ceiling =
+  DNS single-label limits), a constant both ends know. The **client** picks `B`
+  within it from *its own* resolver health; the server has no say and advertises
+  nothing — it parses any length by self-description, and the query-name size only
+  affects the client→resolver path, never the server. The version is the
+  capability signal: the `ChatInfo` min/max **version** range (pinned, bound into
+  the handshake) already tells the client which range applies, and because chat is
+  unreleased, v1 includes variable `B` from the start — there is no "old server"
+  to fall back for.
+
+**Op framing.** An op that fits in `B` is one cell (zero-padded to `B`, uniform
+as today). An op larger than `B` — only the address-carrying control ops, and
+only at small `B` — is fragmented with `OP_FRAG` (op 9):
+`op(1) ‖ idx(1) ‖ total(1) ‖ chunk`, reassembled server-side (bounded, like the
+upload/handshake reassembly) then re-dispatched. The body `DATA` chunk becomes
+`B − 2`. **No wire field carries `B`:** every cell on a connection is the same
+budget, so the server reads `B` from the cell length (minus jitter) and infers
+the chunk size as `B − 2`; a fragmented `SEND_START` re-dispatches with the
+*cell's* `B`, not the reassembled-op length. Content, addresses, identity,
+crypto, and **responses** (they ride the larger TXT answer, not the query name)
+are all unaffected by `B`.
+
+**Setting.** One **global** user setting: three fixed presets — **Compact /
+Standard / Wide** — over `B ∈ [6, 21]`, plus **Auto** (the **default**).
+
+**Auto mode.** Per server (each network path scores independently), Auto measures
+each preset by recent send success and prefers the best while never abandoning
+the others. A send "succeeds" for its budget if the cells reached the server
+(a normal result *or* any server-status reply — replay/quota/… mean the transport
+worked); only a transport failure (unreachable/timeout) counts against it. Scores
+are an **EWMA** (recent sends dominate, so a mode that starts losing — or recovers
+— is re-scored within a handful of messages), selection is **epsilon-greedy** (a
+bounded fraction explores so a poor mode is still sampled but not hammered), and a
+mode unused for a while is re-measured first — which is also how stale results age
+out. The UI shows each mode's live score.
+
+**Blending via deterministic jitter.** A small `B` lands every chat query
+*inside* the feed's measured length range; the always-on background poll (one
+cell at any `B`) then stops being a length tell. To avoid a *fixed-length* spike
+within that cloud, each cell is padded to a jittered length — but the pad is
+**deterministic per cell**, derived from a keystream of `selector ‖ counter`
+under `query_key`, **never fresh randomness per send**. This is load-bearing:
+a cell is retransmitted byte-for-byte and scattered across several resolvers, and
+identical query names are what let a resolver that already answered serve the
+cached reply on a retry. Random-per-send pad would change the name every attempt
+and defeat that cache. So **different cells get different lengths** (the spike
+dissolves), while **the same cell is always byte-identical** (retransmit + scatter
+stay cacheable). The pad rides inside the seal — the op plaintext is padded to the
+deterministic length before sealing — and is harmless because every op is
+fixed-length and self-delimiting (trailing pad is ignored; `DATA` uses its known
+real-chunk length from the total). The one exception is `OP_FRAG`, whose chunk is
+concatenated on reassembly, so fragment cells carry **no jitter** — they sit at
+the budget floor, itself a real feed length. The remaining fingerprint is the
+multi-cell *burst* of a send (§15).
+
+**Cost.** Small `B` means more cells per send (≈1.6× at `B=10`, ≈3× at `B=6`);
+the poll stays one cell. It is opt-in precisely because more queries is slower on
+weak links.
 
 ---
 
@@ -295,6 +388,29 @@ in-context cells.
 
 `ensureSession` tries AUTH first; on `unknown_sender` it falls back to REGISTER.
 
+### 9.1 `ek` rotation and session forward secrecy
+
+`ek` is the single static key behind every `Ksession`, so a later compromise of
+`ek_priv` plus recorded handshakes would let a passive observer recompute past
+session keys and read the *session-layer* metadata (peer handles, op patterns,
+sizes). Content is unaffected (separate `content_key`), but to bound that window
+the server **rotates `ek` periodically** (default weekly):
+
+- A new `ek` keypair is generated; the current key moves to a short-lived
+  *previous* set and the new public key is re-published in the **signed**
+  `ChatInfo`.
+- New handshakes are tried against the current key, then any previous key still
+  inside its grace window — so a client whose cached `ChatInfo` predates the
+  rotation (clients refresh hourly) is never locked out.
+- **Live sessions are unaffected:** `Ksession` is derived once at handshake and
+  cached, never recomputed from `ek` per op.
+- Past its grace the old private key is destroyed. An `ek_priv` captured *now*
+  can no longer derive sessions from before the previous rotation — forward
+  secrecy at the rotation granularity.
+
+This does not give content forward secrecy (still §15-2); it caps the blast
+radius of the `ek` SPOF for the session/control layer.
+
 ---
 
 ## 10. In-context operations
@@ -305,9 +421,9 @@ Op byte = `version<<4 | op` in the first sealed plaintext byte.
 |----|---|------------------|---------|
 | `INBOX_STATUS` | 1 | — | list waiting messages + quota |
 | `INBOX_FETCH`  | 2 | `peer_handle(4) ‖ seq(4) ‖ block(1)` | fetch one envelope block |
-| `ACK`          | 3 | `peer_handle(4) ‖ up_to_seq(3)` | confirm delivery, free inbox |
+| `ACK`          | 3 | `peer_handle(4) ‖ up_to_seq(3) ‖ receipt(6)` | confirm delivery, free inbox, sign ✓✓ (§12) |
 | `KEY_FETCH`    | 4 | `addr(12)` | fetch a peer's registration record |
-| `SEND_STATUS`  | 5 | `addr(12)` | read ✓/✓✓ counters for messages I sent |
+| `SEND_STATUS`  | 5 | `addr(12)` | read ✓/✓✓ counters + receipt for messages I sent |
 | `SEND_START`   | 6 | `dst(12) ‖ total_len(2)` | begin an upload |
 | `DATA`         | 7 | `idx(1) ‖ chunk(≤13)` | one body chunk |
 | `FIN`          | 8 | `crc32(4)` | commit the upload |
@@ -326,12 +442,25 @@ Status codes (in the sealed response, first byte):
 the feed's normal passphrase response layer inside a TXT record. If the server no
 longer knows the session (TTL expiry or reboot) it cannot produce a sealed reply,
 so it returns a 1-byte **session-lost sentinel** (`0xE5`); the client
-transparently re-handshakes and retries.
+transparently re-handshakes and retries. `0xE5` is the one unauthenticated
+message (the server can't seal it), so an on-path attacker can inject it to force
+re-handshakes; the client therefore **rate-limits handshakes** (a minimum gap
+between them), bounding the amplification a `0xE5` flood can cause while still
+recovering promptly from a genuine reboot/expiry.
 
 Counter discipline: in-context counters live below the reserved regions
 (`0x400000` bootstrap, `0x800000` response bit). A client re-handshakes well
 before exhausting the 22-bit space; the server rejects any in-context counter
 ≥ `0x400000`.
+
+**No in-session anti-replay window — on purpose.** Cells are retransmitted
+*verbatim* (same counter) on UDP loss, and the server processes each counter
+**statelessly and idempotently** — that is what makes loss recovery work over
+DNS. A reject-on-duplicate window would break legitimate retransmits, and buys
+nothing: every op is idempotent, so replaying a captured cell merely re-runs the
+same op to the same result. Keystream reuse is likewise a non-issue: a counter is
+only ever reused for the *identical* plaintext (a retransmit), so no two distinct
+plaintexts share a nonce.
 
 ---
 
@@ -428,12 +557,39 @@ ambiguous handle the op returns `not_found` and the client retries).
 **Delivery ticks** are per-pair-per-server counters the sender reads with
 `SEND_STATUS`:
 
-- `last_accepted` (✓) — the server stored the message.
-- `last_delivered` (✓✓) — the recipient fetched **and** ACKed it (the ACK both
-  frees the server copy and raises this counter).
+- `last_accepted` (✓) — the server stored the message. This is the server's word,
+  but it only confirms an upload the sender already witnessed (the `FIN`-OK).
+- `last_delivered` (✓✓) — the recipient fetched **and** ACKed it.
 
-Because seq is per-server, these counters are **per-server** too: a message sent
-on server A keeps its ✓✓ even after the conversation switches to server B.
+**✓✓ is end-to-end authenticated (the server cannot forge it).** A bare counter
+would be the relay's unverifiable claim, so the ACK carries a 6-byte **receipt**:
+
+```
+receipt_key = HKDF( ECDH(my_enc_priv, peer_enc_pub), info = "thefeed-chat-receipt-v1" )
+receipt     = HMAC( receipt_key, "thefeed-chat-receiptmac-v1" ‖ sender ‖ recipient ‖ up_to_seq )[:6]
+```
+
+`receipt_key` is the same pair ECDH the content uses, so only the two ends — never
+the server — can compute it. The recipient signs its `up_to_seq` watermark; the
+server stores `(up_to_seq, receipt)` and relays it in `SEND_STATUS`; the sender
+recomputes the MAC and only shows ✓✓ if it verifies. `(sender, recipient)` are
+bound in originator-first order (so a receipt can't be reflected onto the reverse
+direction) and `up_to_seq` is bound (so an old receipt can't be replayed for a
+higher seq). The server can still **withhold** a real receipt (it can drop any
+data) — unavoidable for a relay — but it **cannot fabricate** a ✓✓. If the receipt
+is absent or invalid the sender simply shows no ✓✓ (degrades to ✓), never a false
+one. Cost: the 6-byte tag keeps both the ACK and the `SEND_STATUS` response inside
+one cell.
+
+Because seq is per-server, these counters (and receipts) are **per-server** too: a
+message sent on server A keeps its ✓✓ even after the conversation switches to
+server B.
+
+**Receive-side replay.** The recipient keeps a per-(pair, server) high-water of
+the seq it has acked, and drops any inbound message with `seq ≤` that watermark.
+Acks are contiguous (a fetch gap withholds later seqs), so anything at/below the
+mark was already delivered; this stops a malicious server re-serving an old,
+authentic envelope to make it render twice — even after local history is cleared.
 
 ---
 
@@ -458,8 +614,8 @@ Default limits (advertised in `ChatInfo`, operator-tunable):
 
 **What the server learns:** routing pairs (who messages whom on this server),
 message sizes and counts, timing, and the social graph of accounts registered on
-it. **What it cannot learn:** message content. Reducing the metadata exposure is
-an open problem (§15).
+it. **What it cannot learn:** message content. This metadata exposure is an
+accepted cost (§15-5).
 
 ---
 
@@ -477,50 +633,83 @@ an open problem (§15).
 | E2E content | HKDF(ECDH(enc,enc)) | "…content-v1" ‖ src ‖ dst ‖ seq |
 | Message body | AES-256-GCM, random 12-byte nonce (in envelope) | content_key |
 | Server MAC | HMAC(kss)[:8] | src ‖ dst ‖ seq ‖ SHA-256(nonce‖ct) |
+| Delivery receipt | HKDF(ECDH(enc,enc)) → HMAC[:6] | key "…receipt-v1"; MAC "…receiptmac-v1" ‖ sender ‖ recipient ‖ up_to_seq |
 | Registration | ed25519 signature | "…register-v1" |
+
+`ek` rotates periodically (default weekly); the rotated-out key authenticates
+handshakes through a grace window, then its private half is destroyed (§9.1).
 
 HKDF is HKDF-SHA256 throughout. All multi-byte integers are big-endian.
 
 ---
 
-## 15. Open questions for reviewers
+## 15. Design decisions & trade-offs
 
-These are the design choices we are least sure about. Comments very welcome.
+Deliberate choices and accepted trade-offs, recorded so the rationale isn't lost.
+The protocol is pre-release, so incompatible improvements are still in scope
+(§17) — but these are where we have landed, not open questions.
 
-1. **4-byte per-op seal tag.** Adequate given online rate-limiting and that a
-   forgery only yields E2E ciphertext — or false economy? Cell space is tight
-   (15 plaintext bytes); a longer tag costs payload.
-2. **No forward secrecy for content.** `content_key` derives from long-term enc
-   keys, so a seed compromise decrypts all past messages held by the server.
-   Worth a ratchet (e.g. X3DH + Double Ratchet) given the constraints, or out of
-   scope for a "lite" relay messenger?
-3. **Content nonce — RESOLVED.** An earlier draft used a fixed zero GCM nonce,
-   "safe iff `content_key` never repeats". It did repeat: `seq` is per-server, so
-   the same `(src,dst,seq)` recurs across servers → keystream reuse. Fixed by
-   carrying a random 12-byte nonce per message (§11.1). Remaining residual: GCM
-   is not nonce-misuse-resistant, so a broken RNG would still be catastrophic; a
-   future move to a nonce-misuse-resistant AEAD (AES-GCM-SIV / deterministic
-   construction) would harden this at zero wire cost — worth it?
-4. **Metadata to the server.** The relay sees the full routing graph. Sealed
-   sender addresses, cover traffic, or per-recipient pseudonymous mailboxes are
-   all possible — what is the right cost/benefit here?
-5. **`peer_handle` = 4 bytes** disambiguates the sender within the caller's own
-   pairs for `INBOX_FETCH`, `ACK`, and `SEND_STATUS` (the full 12-byte address
-   would not fit a cell alongside seq+block). A prefix collision among *your own*
-   contacts forces a retry; acceptable, or worth a larger handle / different
-   scheme?
-6. **Account proof replay window.** Domain-bound and timestamped; is the skew
-   handling (one clock-corrected retry) safe against a replay-within-window?
-7. **DoS / abuse.** Rate limits are per account, but registration is cheap
-   (self-signed). Should registration carry a proof-of-work or be invite-gated?
-8. **Versioning / negotiation.** Three hooks now exist: the signed `ChatInfo`
-   min/max range, the op-byte version nibble, and the handshake `proto_ver` byte
-   bound into `Ksession` (downgrade-resistant). A future multi-version server
-   branches its derivation/parsers on `proto_ver`. What is missing for an actual
-   v1→v2 migration is (a) the server running two derivations at once and (b) the
-   envelope/register parsers dispatching by version instead of single-accept — is
-   this scaffolding sufficient, and should a new client also speak the old version
-   to reach not-yet-upgraded peers?
+1. **4-byte per-op seal tag — accepted.** Forging a sealed cell costs ~2³²
+   *online*, rate-limited DNS round-trips per `(selector, counter)`, against
+   limits that are **per account** (the session cap and send-rate live on the
+   account address, so the multi-domain spread does not multiply the budget). A
+   forgery yields only E2E ciphertext; a forged *control* cell could corrupt
+   delivery state, but the 2³² online cost bounds that. Cell space is tight (15
+   plaintext bytes by default) and a longer tag costs payload, so 4 bytes stands.
+2. **No content forward secrecy — by design.** `content_key` derives from
+   long-term enc keys, so a stolen seed decrypts past messages still held on a
+   server. This is the deliberate "lite messenger" trade-off: no per-message
+   ratchet (X3DH / Double Ratchet) and the complexity it would add. The *session
+   / metadata* layer does get forward secrecy from `ek` rotation (§9.1); message
+   content does not.
+3. **Authenticated delivery (✓✓).** ✓✓ was once a bare server-maintained counter
+   a malicious relay could fabricate or suppress. It now carries an E2E pair-MAC
+   **receipt** (§12): the server can no longer forge a ✓✓, only withhold one
+   (which no relay can be stopped from doing). +6 bytes on the ACK / `SEND_STATUS`,
+   still one cell.
+4. **Random message nonce.** An earlier draft used a fixed zero GCM nonce, "safe
+   iff `content_key` never repeats" — but `seq` is per-server, so the same
+   `(src,dst,seq)` recurs across servers → keystream reuse. Fixed by carrying a
+   random 12-byte nonce per message (§11.1). Residual: AES-GCM is not
+   nonce-misuse-resistant, so a broken RNG would still be catastrophic; a
+   nonce-misuse-resistant AEAD (AES-GCM-SIV) would harden this at zero wire cost
+   and is a candidate for a later version.
+5. **Server metadata exposure — accepted cost.** The relay sees the routing graph
+   (who messages whom on it), message sizes, and timing — never content. This is
+   the unavoidable cost of store-and-forward through a third party; we document it
+   rather than mitigate it. (Sealed-sender, cover traffic, or pseudonymous
+   mailboxes stay theoretically possible but out of scope.)
+6. **`peer_handle` = 4 bytes.** `INBOX_FETCH` / `ACK` / `SEND_STATUS` name the
+   peer by the first 4 bytes of its address (the full 12 would not fit a cell
+   alongside seq+block). A prefix collision can only ever match another of *your
+   own* contacts; the server returns `not_found` and the client retries. Accepted.
+7. **Address = 96 bits (12 bytes).** The largest that fits the single-cell control
+   ops (`SEND_START` = op+addr+len = exactly 15 plaintext bytes at the default
+   budget). Hijacking a specific address is a second-preimage = 2⁹⁶ *with an
+   elliptic-curve keygen per attempt* — infeasible for any attacker; the only
+   erosion is multi-target, which a niche DNS messenger never reaches. 96 bits
+   chosen deliberately.
+8. **Account-proof freshness.** The AUTH proof binds the chat domain and a
+   timestamp checked against server time within a skew window; a clock-skewed
+   client is told the server's time and retries once. Domain binding blocks
+   cross-server replay; the skew window bounds any within-server replay to its
+   width.
+9. **Open registration + per-account limits.** Registration is self-signed and
+   free; abuse is bounded by per-account rate limits (sends/hour, inbox/pair caps,
+   concurrent-session cap). No proof-of-work or invite gate — kept simple; the
+   limits can tighten if abuse appears.
+10. **Versioning scaffolding.** Three hooks exist: the signed `ChatInfo` min/max
+   version range, the op-byte version nibble, and the handshake `proto_ver` byte
+   bound into `Ksession` (downgrade-resistant). A real v1→v2 migration would add
+   (a) the server running two derivations at once and (b) envelope/register
+   parsers dispatching by version instead of single-accept. The scaffolding is in
+   place; the dispatch is built when a v2 actually exists.
+11. **Traffic shape vs. the feed.** §8.2's configurable cell size plus
+   **deterministic per-cell jitter** put chat *inside* the feed's length spread
+   (deterministic so retransmits/scatter stay cache-stable — random-per-send pad
+   would break that). The one remaining tell is the **burst** of a multi-cell send
+   (N queries, a different shape than a feed read); pacing it or riding the feed's
+   cover traffic is a planned later layer.
 
 ---
 
@@ -533,6 +722,14 @@ These are the design choices we are least sure about. Comments very welcome.
 - **Key substitution:** defeated by `address = hash(identity_pub)` plus the
   recipient re-checking it on every key fetch.
 - **Cross-server replay:** the account proof binds the chat domain.
+- **Authenticated delivery:** ✓✓ carries an E2E pair-MAC receipt — the relay can
+  withhold it but cannot fabricate one (§12).
+- **Receive-side replay:** a per-pair acked high-water drops an old envelope a
+  malicious relay re-serves, even after local history is cleared (§12).
+- **Session forward secrecy:** `ek` rotates; the old private half is destroyed
+  after a grace window, bounding an `ek` compromise to one rotation (§9.1).
+- **Handshake-flood bound:** the injectable `0xE5` sentinel can force a
+  re-handshake, but the client rate-limits handshakes to cap the amplification.
 - **Fail-closed everywhere:** unverifiable `ChatInfo`, an unknown session, or a
   bad seal all stop the operation rather than degrading.
 - **Compression:** inbound bodies are size-capped before inflation to bound a
@@ -542,6 +739,6 @@ These are the design choices we are least sure about. Comments very welcome.
 
 ## 17. How to comment
 
-Open an issue or PR against this file. For wire-level proposals, please reference
-the section and give the concrete byte layout. Because the protocol is
-pre-release, **incompatible** improvements are in scope — propose freely.
+Found a **security issue**, or have a **concrete** wire-level improvement? Open an
+issue or PR against this file, referencing the section and giving the byte layout.
+Because the protocol is pre-release, **incompatible** improvements are in scope.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hmac"
 	cryptoRand "crypto/rand"
 	"encoding/base32"
 	"encoding/binary"
@@ -132,6 +133,13 @@ type ChatClient struct {
 	// the per-op c.mu critical sections.
 	opSeq sync.Mutex
 
+	// fragMu serializes whole OP_FRAG sequences (a control op too big for the
+	// budget, split across cells). The server reassembles one fragmented op at a
+	// time per session, so two concurrent fragmented ops — e.g. an unserialized
+	// PeerStatus racing a send — must not interleave. Independent of opSeq and
+	// taken only when actually fragmenting (single-cell ops skip it).
+	fragMu sync.Mutex
+
 	mu          sync.Mutex
 	info        *protocol.ChatInfo
 	infoAt      time.Time
@@ -148,6 +156,15 @@ type ChatClient struct {
 	ksession    [protocol.KeySize]byte
 	sessUp      bool
 	sendCounter uint32
+	// lastHandshake throttles re-handshakes: the session-lost sentinel (0xE5) is
+	// unauthenticated, so an on-path attacker can inject it to force endless
+	// re-handshakes. Spacing handshakes by chatRehandshakeMinGap caps that
+	// amplification while still letting a genuine reboot/expiry recover.
+	lastHandshake time.Time
+	// budget is the per-cell op-plaintext budget B (RFC §8.2): smaller = shorter
+	// queries, more of them. The cell is self-describing by length, so the server
+	// needs no negotiation; the value is clamped to [ChatCellPlainMin, Max].
+	budget int
 }
 
 const (
@@ -170,6 +187,10 @@ const (
 	// most ops any single op() can issue (a max upload is ≤ a few thousand), so
 	// the proactive re-handshake never lands mid-operation.
 	chatMaxSessionCounter = 0x3F0000
+
+	// chatRehandshakeMinGap is the minimum spacing between handshakes, throttling
+	// an injected-0xE5 loop (see ChatClient.lastHandshake).
+	chatRehandshakeMinGap = time.Second
 )
 
 // NewChatClient creates a chat driver bound to a fetcher and identity.
@@ -178,7 +199,30 @@ func NewChatClient(f *Fetcher, id *ChatIdentity) *ChatClient {
 		f:        f,
 		id:       id,
 		keyCache: make(map[[protocol.AddressSize]byte]*protocol.RegisterEnvelope),
+		budget:   protocol.ChatCellPlainSize, // default = today's wire
 	}
+}
+
+// chunkSize is the message-body bytes carried by one DATA cell at the current
+// budget (op(1) + idx(1) + chunk = budget).
+func (c *ChatClient) chunkSize() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.budget - 2
+}
+
+// SetBudget sets the per-cell op-plaintext budget B (clamped to the valid
+// range). Smaller B = shorter query names but more cells per message.
+func (c *ChatClient) SetBudget(b int) {
+	if b < protocol.ChatCellPlainMin {
+		b = protocol.ChatCellPlainMin
+	}
+	if b > protocol.ChatCellPlainMax {
+		b = protocol.ChatCellPlainMax
+	}
+	c.mu.Lock()
+	c.budget = b
+	c.mu.Unlock()
 }
 
 // Identity returns the client identity.
@@ -218,6 +262,20 @@ func (c *ChatClient) updateQuota(remaining uint16, reset uint32) {
 	c.mu.Lock()
 	c.quotaRem, c.quotaReset, c.quotaKnown = remaining, reset, true
 	c.mu.Unlock()
+}
+
+// ServerAdvertisesChat is the cheap availability pre-check: it reads the signed
+// feed's ChatAvailable bit from metadata block 0 — one query, no ChatInfo
+// retries. A chatless server has no ChatInfo channel, so the full probe only
+// fails after several retried DNS fetches; this short-circuits that. known=false
+// means block 0 didn't carry the flag or the fetch failed, so the caller should
+// fall back to the authoritative EnsureInfo probe rather than assume anything.
+func (c *ChatClient) ServerAdvertisesChat(ctx context.Context) (advertises, known bool) {
+	b0, err := c.f.FetchBlock(ctx, protocol.MetadataChannel, 0)
+	if err != nil {
+		return false, false
+	}
+	return protocol.ChatAvailableFromBlock0(b0)
 }
 
 // EnsureInfo fetches and verifies the ChatInfo capability payload once (and
@@ -357,10 +415,24 @@ func (c *ChatClient) ensureSession(ctx context.Context, info *protocol.ChatInfo)
 	// A near-exhausted counter is treated as "no session" so we re-handshake
 	// before any op (covering multi-exchange uploads) rather than mid-stream.
 	up := c.sessUp && c.sendCounter < chatMaxSessionCounter
+	last := c.lastHandshake
 	c.mu.Unlock()
 	if up {
 		return nil
 	}
+	// Throttle re-handshakes so an injected session-lost (0xE5) can't drive a
+	// tight handshake/register loop. A first handshake (zero lastHandshake) and a
+	// genuine, spaced-out recovery are unaffected.
+	if wait := chatRehandshakeMinGap - time.Since(last); wait > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	c.mu.Lock()
+	c.lastHandshake = time.Now()
+	c.mu.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
 		ref, ks, status, srvUnix, err := c.handshake(ctx, info, protocol.ChatHandshakeAuth)
 		if err != nil {
@@ -521,10 +593,19 @@ func (c *ChatClient) exchange(ctx context.Context, plaintext []byte) (status byt
 	ks := c.ksession
 	ctr := c.sendCounter
 	c.sendCounter++
+	budget := c.budget
 	domain := chatDomain(c.info, int(ctr), 0)
 	c.mu.Unlock()
 
-	payload, err := protocol.SealChatCellPayload(ks, ref, ctr, plaintext)
+	// Deterministic per-cell jitter: pad to budget+j so cells vary in length
+	// (blending with the feed), keyed by (selector, counter) so a retransmit is
+	// byte-identical and resolver-cacheable. OP_FRAG cells get no jitter — their
+	// chunk is concatenated server-side, so trailing pad can't ride along.
+	padded := budget
+	if protocol.ChatPlainOp(plaintext) != protocol.ChatOpFrag {
+		padded += protocol.ChatCellJitter(c.f.queryKey, ref, ctr)
+	}
+	payload, err := protocol.SealChatCellPayloadN(ks, ref, ctr, plaintext, padded)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -561,19 +642,52 @@ func (c *ChatClient) exchange(ctx context.Context, plaintext []byte) (status byt
 	return st, b, nil
 }
 
+// sendOp sends one in-context op, fragmenting it across OP_FRAG cells when its
+// plaintext exceeds the current budget (Compact, B<op size). A single-cell op
+// goes straight through exchange. The fragmenting path is serialized by fragMu
+// so concurrent oversized ops can't interleave on the server's per-session
+// reassembly buffer; only the completing fragment returns the inner op result.
+func (c *ChatClient) sendOp(ctx context.Context, plaintext []byte) (byte, []byte, error) {
+	c.mu.Lock()
+	budget := c.budget
+	c.mu.Unlock()
+	if len(plaintext) <= budget {
+		return c.exchange(ctx, plaintext)
+	}
+	frags := protocol.SplitChunks(plaintext, budget-3) // op+idx+total header
+	if len(frags) > 255 {
+		return 0, nil, fmt.Errorf("chat: op too large to fragment (%d cells)", len(frags))
+	}
+	c.fragMu.Lock()
+	defer c.fragMu.Unlock()
+	for i, frag := range frags {
+		st, body, err := c.exchange(ctx, protocol.BuildChatFragPlain(uint8(i), uint8(len(frags)), frag))
+		if err != nil {
+			return 0, nil, err
+		}
+		if i == len(frags)-1 {
+			return st, body, nil // completing fragment carries the inner op's response
+		}
+		if st != protocol.ChatStatusFragMore {
+			return st, body, nil // unexpected early completion/error — surface it
+		}
+	}
+	return 0, nil, fmt.Errorf("chat: fragmentation produced no cells")
+}
+
 // op ensures a session, runs one in-context op, and transparently re-handshakes
 // once on session loss (reboot/expiry). A second loss → ErrChatUnreachable.
 func (c *ChatClient) op(ctx context.Context, info *protocol.ChatInfo, plaintext []byte) (byte, []byte, error) {
 	if err := c.ensureSession(ctx, info); err != nil {
 		return 0, nil, err
 	}
-	st, body, err := c.exchange(ctx, plaintext)
+	st, body, err := c.sendOp(ctx, plaintext)
 	if errors.Is(err, errChatSessionLost) {
 		c.invalidateSession()
 		if err = c.ensureSession(ctx, info); err != nil {
 			return 0, nil, err
 		}
-		st, body, err = c.exchange(ctx, plaintext)
+		st, body, err = c.sendOp(ctx, plaintext)
 		if errors.Is(err, errChatSessionLost) {
 			return 0, nil, ErrChatUnreachable
 		}
@@ -736,9 +850,9 @@ func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize
 					return nil, e
 				}
 				info = nfo
+				cs := c.chunkSize()
 				c.f.log("[chat] sending to %s seq=%d (%dB, %d blocks)…",
-					ChatAddressString(peer)[:8], seq, len(env),
-					(len(env)+protocol.ChatDataChunkSize-1)/protocol.ChatDataChunkSize)
+					ChatAddressString(peer)[:8], seq, len(env), (len(env)+cs-1)/cs)
 			}
 		}
 
@@ -800,7 +914,7 @@ func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize
 // upload runs SEND_START / DATA (selective repeat) / FIN against the session,
 // restarting from SEND_START if the session is lost mid-upload.
 func (c *ChatClient) upload(ctx context.Context, info *protocol.ChatInfo, peer [protocol.AddressSize]byte, env []byte, progress ChatProgress) (status byte, lastAccepted uint32, remaining uint16, reset uint32, err error) {
-	chunks := protocol.SplitChunks(env, protocol.ChatDataChunkSize)
+	chunks := protocol.SplitChunks(env, c.chunkSize())
 	total := len(chunks)
 	crc := crc32.ChecksumIEEE(env)
 	report := func(done int) {
@@ -1056,8 +1170,18 @@ func (c *ChatClient) Ack(ctx context.Context, peer [protocol.AddressSize]byte, u
 	if err != nil {
 		return err
 	}
+	// E2E receipt: prove to the sender (peer) that we received peer→us up to
+	// upToSeq. The peer enc key is cached from inbox decryption; on a miss we
+	// still ack (freeing quota), just without proof — the sender then sees no
+	// verified ✓✓ rather than a forgeable one.
+	var receipt [protocol.ChatReceiptMACSize]byte
+	if rec, kerr := c.FetchPeerKey(ctx, peer); kerr == nil {
+		if rk, derr := protocol.ChatReceiptKey(c.id.Enc, rec.EncPub); derr == nil {
+			receipt = protocol.ChatReceiptMAC(rk, peer, c.id.Addr, upToSeq)
+		}
+	}
 	handle := protocol.ChatPeerHandle(peer)
-	st, _, err := c.op(ctx, info, protocol.BuildChatAckPlain(handle, upToSeq))
+	st, _, err := c.op(ctx, info, protocol.BuildChatAckPlain(handle, upToSeq, receipt))
 	if err != nil {
 		return err
 	}
@@ -1084,12 +1208,43 @@ func (c *ChatClient) PeerStatus(ctx context.Context, peer [protocol.AddressSize]
 		if len(body) < 8 {
 			return 0, 0, fmt.Errorf("chat: short sendstatus response")
 		}
-		return binary.BigEndian.Uint32(body), binary.BigEndian.Uint32(body[4:]), nil
+		accepted = binary.BigEndian.Uint32(body)
+		delivered = binary.BigEndian.Uint32(body[4:])
+		// ✓✓ is only trustworthy with the recipient's E2E receipt: a malicious
+		// server can suppress it (delivered falls back to "unproven" = 0) but
+		// can't forge one. ✓ (accepted) stays as the server reports — it only
+		// confirms an upload the sender already witnessed.
+		if delivered > 0 {
+			var receipt [protocol.ChatReceiptMACSize]byte
+			if len(body) >= 8+protocol.ChatReceiptMACSize {
+				copy(receipt[:], body[8:])
+			}
+			if !c.verifyReceipt(ctx, peer, delivered, receipt) {
+				delivered = 0
+			}
+		}
+		return accepted, delivered, nil
 	case protocol.ChatStatusNotFound:
 		return 0, 0, nil
 	default:
 		return 0, 0, &ChatStatusError{Op: protocol.ChatOpSendStatus, Status: st}
 	}
+}
+
+// verifyReceipt checks the recipient's E2E delivery proof for upToSeq. Both
+// ends bind (sender, recipient) in originator-first order, so here sender is us
+// and recipient is peer.
+func (c *ChatClient) verifyReceipt(ctx context.Context, peer [protocol.AddressSize]byte, upToSeq uint32, receipt [protocol.ChatReceiptMACSize]byte) bool {
+	rec, err := c.FetchPeerKey(ctx, peer)
+	if err != nil {
+		return false
+	}
+	rk, err := protocol.ChatReceiptKey(c.id.Enc, rec.EncPub)
+	if err != nil {
+		return false
+	}
+	want := protocol.ChatReceiptMAC(rk, c.id.Addr, peer, upToSeq)
+	return hmac.Equal(want[:], receipt[:])
 }
 
 // NextSeq returns the next usable message sequence for peer, recovered from the

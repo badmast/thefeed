@@ -174,6 +174,81 @@ func newChatTestClient(t *testing.T, ts *chatTestServer) *ChatClient {
 	return NewChatClient(f, id)
 }
 
+// TestChatClientWideBudget: a full send/fetch/ack round-trip works at a
+// non-default cell budget, and across two clients using different budgets
+// (B is a per-client transport choice, not end-to-end). Exercises the
+// length-driven cell and the server inferring the DATA chunk size as B-2.
+func TestChatClientWideBudget(t *testing.T) {
+	limits := protocol.DefaultChatLimits()
+	ts := newChatTestServer(t, limits)
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+	a.SetBudget(protocol.ChatCellPlainMax)  // Wide (21): bigger cells, fewer of them
+	b.SetBudget(protocol.ChatCellPlainSize) // default (15): cross-budget interop
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+	// Long enough to span several DATA cells at B=21 (chunk = 19 bytes).
+	text := strings.Repeat("wide-cell ", 30)
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 1, text, nil); err != nil {
+		t.Fatalf("send at wide budget: %v", err)
+	}
+	msgs, err := b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Text != text {
+		t.Fatalf("message mismatch: %d msgs", len(msgs))
+	}
+	if err := b.Ack(ctx, a.Identity().Addr, 1); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if acc, del, err := a.PeerStatus(ctx, b.Identity().Addr); err != nil || acc != 1 || del != 1 {
+		t.Fatalf("status=(%d,%d) err=%v", acc, del, err)
+	}
+}
+
+// TestChatClientBudgets runs a full send/fetch/ack round-trip at every budget,
+// including Compact (B=6,8) where the control ops (SEND_START, ACK, KEY_FETCH,
+// SEND_STATUS, INBOX_FETCH) exceed the cell and must fragment via OP_FRAG.
+func TestChatClientBudgets(t *testing.T) {
+	for _, budget := range []int{protocol.ChatCellPlainMin, 8, protocol.ChatCellPlainSize, protocol.ChatCellPlainMax} {
+		budget := budget
+		t.Run(fmt.Sprintf("B%d", budget), func(t *testing.T) {
+			limits := protocol.DefaultChatLimits()
+			ts := newChatTestServer(t, limits)
+			a := newChatTestClient(t, ts)
+			b := newChatTestClient(t, ts)
+			a.SetBudget(budget)
+			b.SetBudget(budget)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			if err := b.Register(ctx, nil); err != nil {
+				t.Fatalf("register: %v", err)
+			}
+			text := strings.Repeat("frag ", 20) // spans many cells at a small budget
+			if _, err := a.SendMessage(ctx, b.Identity().Addr, 1, text, nil); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			msgs, err := b.FetchInbox(ctx, nil)
+			if err != nil || len(msgs) != 1 || msgs[0].Text != text {
+				t.Fatalf("fetch: %v / %d msgs", err, len(msgs))
+			}
+			if err := b.Ack(ctx, a.Identity().Addr, 1); err != nil {
+				t.Fatalf("ack: %v", err)
+			}
+			if acc, del, err := a.PeerStatus(ctx, b.Identity().Addr); err != nil || acc != 1 || del != 1 {
+				t.Fatalf("status=(%d,%d) err=%v", acc, del, err)
+			}
+		})
+	}
+}
+
 func TestChatAddressString(t *testing.T) {
 	var addr [protocol.AddressSize]byte
 	copy(addr[:], []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
@@ -442,7 +517,7 @@ func TestChatClientSurvivesLostFinAck(t *testing.T) {
 		defer mu.Unlock()
 		if !triggered {
 			// The A→B accepted seq is stored under B's account, keyed by A.
-			if acc, _, _, _ := ts.store.PairState(b.Identity().Addr, a.Identity().Addr, time.Now()); acc >= 1 {
+			if acc, _, _, _, _ := ts.store.PairState(b.Identity().Addr, a.Identity().Addr, time.Now()); acc >= 1 {
 				triggered = true
 				dropBudget = chatCellAttempts // swallow the FIN-OK + all its retransmits
 			}
@@ -515,7 +590,7 @@ func TestChatClientRestartsOnFinUnknownSession(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		if !tripped {
-			if acc, _, _, _ := ts.store.PairState(b.Identity().Addr, a.Identity().Addr, time.Now()); acc >= 1 {
+			if acc, _, _, _, _ := ts.store.PairState(b.Identity().Addr, a.Identity().Addr, time.Now()); acc >= 1 {
 				tripped = true
 				ts.reboot() // RAM sessions gone; the committed message persists
 				return nil, 0, errors.New("synthetic FIN-OK loss")

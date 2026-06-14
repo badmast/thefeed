@@ -489,6 +489,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/chat/send", s.handleChatSend)
 	mux.HandleFunc("/api/chat/poll", s.handleChatPoll)
 	mux.HandleFunc("/api/chat/peer-status", s.handleChatPeerStatus)
+	mux.HandleFunc("/api/chat/settings", s.handleChatSettings)
 	// Profile-pics cache + control endpoints.
 	mux.HandleFunc("/api/profile-pics/", s.profilePics.handleProfilePic)
 	mux.HandleFunc("/api/profile-pics", s.handleProfilePicsList)

@@ -1058,9 +1058,76 @@ function chatListMenu() {
     icon('music') + ' ' + esc(chatT(chatSoundOff() ? 'chat_sound_off' : 'chat_sound_on')) + '</button>' +
     '<button class="chat-sheet-item" onclick="chatCloseMenu();chatOpenLog()">' +
     icon('log') + ' ' + esc(chatT('chat_log')) + '</button>' +
+    '<button class="chat-sheet-item" onclick="chatCloseMenu();chatCellSizeSheet()">' +
+    icon('stats') + ' ' + esc(chatT('chat_query_size')) + '</button>' +
     '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
     '</div>';
   document.getElementById('chatModal').appendChild(sheet);
+}
+
+// chatCellSizeSheet lets the user trade query size against query count (RFC
+// §8.2): Compact blends chat into the feed's query-length cloud (more, smaller
+// queries); Wide is fewer, bigger queries.
+function chatCellSizeSheet() {
+  fetch('/api/chat/settings').then(function (r) { return r.json(); }).then(function (cur) {
+    var presets = cur.presets || { compact: 8, standard: 15, wide: 21 };
+    var byBudget = chatBudgetScores(cur.scores); // budget -> {score, used}
+    var opts = [
+      { key: 'auto', label: chatT('chat_size_auto'), hint: chatT('chat_size_auto_hint') },
+      { key: 'compact', label: chatT('chat_size_compact'), hint: chatT('chat_size_compact_hint') },
+      { key: 'standard', label: chatT('chat_size_standard'), hint: chatT('chat_size_standard_hint') },
+      { key: 'wide', label: chatT('chat_size_wide'), hint: chatT('chat_size_wide_hint') }
+    ];
+    var sheet = document.createElement('div');
+    sheet.className = 'chat-sheet-overlay';
+    sheet.id = 'chatSheet';
+    sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+    var items = '<div class="chat-sheet-title">' + esc(chatT('chat_query_size')) + '</div>' +
+      '<div class="chat-sheet-hint">' + esc(chatT('chat_query_size_hint')) + '</div>';
+    opts.forEach(function (p) {
+      var on = cur && cur.mode === p.key;
+      // In auto mode show each preset's live score next to it.
+      var score = '';
+      if (cur.mode === 'auto' && p.key !== 'auto') {
+        var sc = byBudget[presets[p.key]];
+        if (sc && sc.used > 0) score = '<span class="chat-score">' + Math.round(sc.score * 100) + '%</span>';
+      }
+      items += '<button class="chat-sheet-item' + (on ? ' chat-sheet-on' : '') +
+        '" onclick="chatSetCellSize(\'' + p.key + '\')">' + (on ? icon('tickSingle') + ' ' : '') +
+        '<span><b>' + esc(p.label) + '</b>' + score + '<br><span class="chat-sheet-hint">' + esc(p.hint) + '</span></span></button>';
+    });
+    items += '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>';
+    sheet.innerHTML = '<div class="chat-sheet">' + items + '</div>';
+    document.getElementById('chatModal').appendChild(sheet);
+  }).catch(function () { showToast(chatT('chat_err_generic')); });
+}
+
+// chatBudgetScores flattens the per-server auto scores into one budget->score
+// map (averaged across servers that have a sample), for display.
+function chatBudgetScores(scores) {
+  var acc = {}; // budget -> {sum, n, used}
+  Object.keys(scores || {}).forEach(function (k) {
+    (scores[k] || []).forEach(function (a) {
+      if (!a.used) return;
+      var e = acc[a.budget] || (acc[a.budget] = { sum: 0, n: 0, used: 0 });
+      e.sum += a.score; e.n++; e.used += a.used;
+    });
+  });
+  var out = {};
+  Object.keys(acc).forEach(function (b) { out[b] = { score: acc[b].sum / acc[b].n, used: acc[b].used }; });
+  return out;
+}
+
+function chatSetCellSize(mode) {
+  fetch('/api/chat/settings', { method: 'POST', body: JSON.stringify({ mode: mode }) })
+    .then(function (r) { return r.json(); })
+    .then(function () {
+      showToast(chatT('chat_query_size_saved'));
+      // Re-open so the new selection (and, for auto, the scores) show.
+      chatCloseMenu();
+      chatCellSizeSheet();
+    })
+    .catch(function () { showToast(chatT('chat_err_generic')); });
 }
 
 async function chatRenderThread() {

@@ -72,7 +72,11 @@ func loadRegister(svc *ChatService, qk [protocol.KeySize]byte, ekPub []byte, c s
 }
 
 func loadOp(svc *ChatService, lc *loadClient, plain []byte) (byte, []byte, error) {
-	payload, _ := protocol.SealChatCellPayload(lc.ks, lc.ref, lc.ctr, plain)
+	pad := protocol.ChatCellPlainSize
+	if protocol.ChatPlainOp(plain) != protocol.ChatOpFrag {
+		pad += protocol.ChatCellJitter(svc.queryKey, lc.ref, lc.ctr)
+	}
+	payload, _ := protocol.SealChatCellPayloadN(lc.ks, lc.ref, lc.ctr, plain, pad)
 	resp := svc.HandleCell(lc.ref, lc.ctr, payload, simDomain, time.Now())
 	st, body, err := protocol.OpenChatResponse(lc.ks, lc.ref, lc.ctr, resp)
 	lc.ctr++
@@ -118,7 +122,7 @@ func loadDrain(svc *ChatService, lc *loadClient) (int, error) {
 	}
 	for src, seq := range maxSeq {
 		h := protocol.ChatPeerHandle(src)
-		if st, _, err := loadOp(svc, lc, protocol.BuildChatAckPlain(h, seq)); err != nil || st != protocol.ChatStatusOK {
+		if st, _, err := loadOp(svc, lc, protocol.BuildChatAckPlain(h, seq, [protocol.ChatReceiptMACSize]byte{})); err != nil || st != protocol.ChatStatusOK {
 			return received, fmt.Errorf("ack st=%d err=%v", st, err)
 		}
 	}

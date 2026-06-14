@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,6 +74,13 @@ type chatThreadFile struct {
 	// ServerSetAt: when the user last switched send server — the UI shows the
 	// "peer switched" banner only for peer messages newer than this.
 	ServerSetAt int64 `json:"serverSetAt,omitempty"`
+	// AckedIn is the highest INCOMING seq we have acked from this peer, per
+	// server. A malicious server can re-serve an old, authentic envelope; any
+	// incoming seq ≤ this watermark was already delivered+acked, so we drop it
+	// instead of rendering it twice — even after local history is cleared (the
+	// message-list scan can't catch that). Acks are contiguous (FetchInbox holds
+	// at a gap), so nothing legitimate is ever below the mark.
+	AckedIn map[string]uint32 `json:"ackedIn,omitempty"`
 }
 
 // chatThreadsFile is chat/threads.json.
@@ -127,6 +135,26 @@ func chatPostSendServer(current, boundAtStart, sentVia string) (string, bool) {
 	return current, false
 }
 
+// replayedIn reports whether an incoming seq from server was already
+// delivered+acked, so a re-served copy must be dropped (not re-rendered). Acks
+// are contiguous, so anything at/below the watermark was definitely seen.
+func (th *chatThreadFile) replayedIn(server string, seq uint32) bool {
+	return seq <= th.AckedIn[server]
+}
+
+// markAckedIn raises the incoming-replay watermark for server; reports whether
+// it moved (so the caller knows to persist).
+func (th *chatThreadFile) markAckedIn(server string, seq uint32) bool {
+	if th.AckedIn == nil {
+		th.AckedIn = map[string]uint32{}
+	}
+	if seq > th.AckedIn[server] {
+		th.AckedIn[server] = seq
+		return true
+	}
+	return false
+}
+
 // migrateStatus folds legacy single-server counters into the per-server maps
 // under the thread's bound server, so ticks survive the upgrade.
 func (th *chatThreadFile) migrateStatus() {
@@ -149,9 +177,10 @@ type perServerChat struct {
 	name         string // profile nickname (for the picker)
 	domain       string
 	client       *client.ChatClient
-	f            *client.Fetcher // its fetcher, so resolvers can be re-synced live
-	backoffUntil time.Time       // skip polling until this time (guarded by chatHub.mu)
-	lastReason   string          // i18n key of the last probe failure (guarded by chatHub.mu)
+	f            *client.Fetcher   // its fetcher, so resolvers can be re-synced live
+	backoffUntil time.Time         // skip polling until this time (guarded by chatHub.mu)
+	lastReason   string            // i18n key of the last probe failure (guarded by chatHub.mu)
+	scorer       *chatBudgetScorer // adaptive cell-budget selection (guarded by chatHub.mu)
 }
 
 // chatHub owns the web-layer chat state. Chat is multi-server: it polls and
@@ -176,6 +205,12 @@ type chatHub struct {
 	// lastResolvers is the resolver list last pushed to the chat fetchers; chat
 	// resolvers track the feed's live healthy pool, re-synced only on change.
 	lastResolvers []string
+	// budget is the per-cell op-plaintext budget B applied to every server's
+	// client (RFC §8.2): the size/count trade-off the user picks via a preset.
+	budget int
+	// budgetMode is "compact"/"standard"/"wide" (fixed, using budget) or "auto",
+	// in which each server's scorer picks a preset per send by recent success.
+	budgetMode string
 
 	sendMu sync.Mutex // one upload at a time (uplink is scarce)
 	pollMu sync.Mutex // one inbox poll at a time
@@ -183,12 +218,14 @@ type chatHub struct {
 
 func newChatHub(s *Server, dataDir string) *chatHub {
 	h := &chatHub{
-		s:        s,
-		dir:      filepath.Join(dataDir, chatDirName),
-		servers:  make(map[string]*perServerChat),
-		contacts: make(map[string]string),
-		threads:  make(map[string]*chatThreadFile),
-		enabled:  make(map[string]bool),
+		s:          s,
+		dir:        filepath.Join(dataDir, chatDirName),
+		servers:    make(map[string]*perServerChat),
+		contacts:   make(map[string]string),
+		threads:    make(map[string]*chatThreadFile),
+		enabled:    make(map[string]bool),
+		budget:     protocol.ChatCellPlainSize, // fixed-mode fallback (Standard)
+		budgetMode: chatBudgetModeAuto,         // default: adaptively pick the best
 	}
 	h.loadState()
 	return h
@@ -230,6 +267,75 @@ func (h *chatHub) loadState() {
 			h.enabled = en
 		}
 	}
+	if raw, err := os.ReadFile(filepath.Join(h.dir, "settings.json")); err == nil {
+		var st struct {
+			Budget int    `json:"budget"`
+			Mode   string `json:"mode"`
+		}
+		if json.Unmarshal(raw, &st) == nil {
+			if st.Budget != 0 {
+				h.budget = clampChatBudget(st.Budget)
+			}
+			if st.Mode != "" {
+				h.budgetMode = st.Mode
+			}
+		}
+	}
+}
+
+// applyBudget chooses and applies the cell budget for a send on ps. In auto
+// mode the server's scorer picks a preset and the chosen arm is returned (to be
+// scored after the send); otherwise the fixed preset is applied and arm = -1.
+func (h *chatHub) applyBudget(ps *perServerChat) int {
+	h.mu.Lock()
+	arm := -1
+	budget := h.budget
+	if h.budgetMode == chatBudgetModeAuto && ps.scorer != nil {
+		arm = ps.scorer.pick(time.Now(), rand.Float64())
+		budget = ps.scorer.arms[arm].Budget
+	}
+	h.mu.Unlock()
+	ps.client.SetBudget(budget)
+	return arm
+}
+
+// chatBudgetSuccess reports whether a send's cells reached the server: nil error
+// or any server-status reply (the request got through and was answered). Only a
+// transport error (unreachable/timeout) counts against the budget.
+func chatBudgetSuccess(err error) bool {
+	if err == nil {
+		return true
+	}
+	var serr *client.ChatStatusError
+	return errors.As(err, &serr)
+}
+
+// recordBudget folds a send outcome into the server's scorer (auto mode only).
+func (h *chatHub) recordBudget(ps *perServerChat, arm int, success bool) {
+	if arm < 0 {
+		return
+	}
+	h.mu.Lock()
+	if ps.scorer != nil {
+		ps.scorer.record(arm, success, time.Now())
+	}
+	h.mu.Unlock()
+}
+
+// clampChatBudget bounds a budget to the valid range.
+func clampChatBudget(b int) int {
+	if b < protocol.ChatCellPlainMin {
+		return protocol.ChatCellPlainMin
+	}
+	if b > protocol.ChatCellPlainMax {
+		return protocol.ChatCellPlainMax
+	}
+	return b
+}
+
+// saveBudgetLocked persists settings.json. Caller holds mu.
+func (h *chatHub) saveBudgetLocked() {
+	_ = h.writeJSONAtomic("settings.json", map[string]any{"budget": h.budget, "mode": h.budgetMode})
 }
 
 // writeJSONAtomic persists v at path via tmp+rename.
@@ -316,12 +422,15 @@ func (h *chatHub) rebuildServersLocked() {
 			h.s.addLog("[chat] server " + key + ": " + ferr.Error())
 			continue
 		}
+		cc := client.NewChatClient(f, h.identity)
+		cc.SetBudget(h.budget) // fixed preset; auto mode overrides per-send
 		h.servers[key] = &perServerChat{
 			serverKey: key,
 			name:      p.Nickname,
 			domain:    p.Config.Domain,
-			client:    client.NewChatClient(f, h.identity),
+			client:    cc,
 			f:         f,
+			scorer:    newChatBudgetScorer(),
 		}
 		if p.ID == pl.Active {
 			h.activeKey = key
@@ -609,6 +718,12 @@ func (h *chatHub) pollServer(ctx context.Context, ps *perServerChat, progress cl
 		if th.Server == "" {
 			th.Server = ps.serverKey
 		}
+		// Replay guard: a seq at/below our acked watermark was already delivered,
+		// so a (re-)served copy is a duplicate — drop it without re-rendering,
+		// even if local history was cleared.
+		if th.replayedIn(ps.serverKey, m.Seq) {
+			continue
+		}
 		dup := false
 		for _, ex := range th.Msgs {
 			if ex.Dir == "in" && ex.Seq == m.Seq && ex.Server == ps.serverKey {
@@ -647,7 +762,15 @@ func (h *chatHub) pollServer(ctx context.Context, ps *perServerChat, progress cl
 		}
 		if err := ps.client.Ack(ctx, peer, seq); err != nil {
 			h.s.addLog("[chat] ack " + addr[:6] + ": " + err.Error())
+			continue
 		}
+		// Ack landed → raise the replay watermark for this peer+server, so a
+		// later re-serve of seq ≤ this is dropped (see the replay guard above).
+		h.mu.Lock()
+		if th := h.threads[addr]; th != nil && th.markAckedIn(ps.serverKey, seq) {
+			h.saveThreadsLocked()
+		}
+		h.mu.Unlock()
 	}
 	return added, nil
 }
@@ -825,8 +948,19 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 			defer wg.Done()
 			cctx, c := context.WithTimeout(ctx, 45*time.Second)
 			defer c()
-			info, err := ps.client.EnsureInfo(cctx)
 			res := sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled}
+			// Cheap pre-check: the signed feed metadata's ChatAvailable bit (one
+			// query) tells us a server has no messenger, so we skip the ChatInfo
+			// probe whose retries-on-absence are the slow path. Only an explicit
+			// "no chat" short-circuits; an unknown/unreachable result falls through
+			// to the authoritative probe.
+			if advertises, known := ps.client.ServerAdvertisesChat(cctx); known && !advertises {
+				res.Reason = "chat_err_disabled"
+				h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(client.ErrChatDisabled)), res.Reason)
+				out[i] = res
+				return
+			}
+			info, err := ps.client.EnsureInfo(cctx)
 			if err != nil {
 				res.Reason = chatStatusKey(err)
 				h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(err)), res.Reason)
@@ -962,6 +1096,95 @@ func (s *Server) handleChatEnable(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "unknown action", 400)
+	}
+}
+
+// chatBudgetPresets map a preset name to a per-cell budget B (RFC §8.2). Compact
+// blends chat queries into the feed's length cloud (more, smaller queries);
+// Wide is fewer, bigger queries (faster on clean resolvers).
+var chatBudgetPresets = map[string]int{
+	"compact":  8,
+	"standard": protocol.ChatCellPlainSize, // 15
+	"wide":     protocol.ChatCellPlainMax,  // 21
+}
+
+func chatBudgetPresetName(b int) string {
+	for name, v := range chatBudgetPresets {
+		if v == b {
+			return name
+		}
+	}
+	return "custom"
+}
+
+// handleChatSettings gets/sets the global cell-size mode: a fixed preset
+// (compact/standard/wide) applied to every server's client, or "auto" — where
+// each server's scorer picks a preset per send by recent success. GET in auto
+// mode also returns the live per-server scores for display.
+func (s *Server) handleChatSettings(w http.ResponseWriter, r *http.Request) {
+	h := s.chat
+	switch r.Method {
+	case http.MethodGet:
+		h.mu.Lock()
+		resp := map[string]any{
+			"mode":    h.budgetMode,
+			"budget":  h.budget,
+			"preset":  chatBudgetPresetName(h.budget),
+			"presets": chatBudgetPresets,
+		}
+		if h.budgetMode == chatBudgetModeAuto {
+			scores := map[string][]chatBudgetArm{}
+			for k, ps := range h.servers {
+				if ps.scorer != nil {
+					scores[k] = ps.scorer.snapshot()
+				}
+			}
+			resp["scores"] = scores
+		}
+		h.mu.Unlock()
+		writeJSON(w, resp)
+	case http.MethodPost:
+		var req struct {
+			Mode   string `json:"mode"`
+			Preset string `json:"preset"`
+			Budget int    `json:"budget"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		mode := req.Mode
+		if mode == "" {
+			mode = req.Preset // a bare preset implies that fixed mode
+		}
+		h.mu.Lock()
+		switch mode {
+		case chatBudgetModeAuto:
+			h.budgetMode = chatBudgetModeAuto
+		case "compact", "standard", "wide":
+			h.budgetMode = mode
+			h.budget = chatBudgetPresets[mode]
+			for _, ps := range h.servers {
+				ps.client.SetBudget(h.budget)
+			}
+		default:
+			if req.Budget == 0 { // no recognizable mode/preset/budget
+				h.mu.Unlock()
+				http.Error(w, "unknown mode", 400)
+				return
+			}
+			h.budgetMode = "standard"
+			h.budget = clampChatBudget(req.Budget)
+			for _, ps := range h.servers {
+				ps.client.SetBudget(h.budget)
+			}
+		}
+		h.saveBudgetLocked()
+		out := map[string]any{"ok": true, "mode": h.budgetMode, "budget": h.budget, "preset": chatBudgetPresetName(h.budget)}
+		h.mu.Unlock()
+		writeJSON(w, out)
+	default:
+		http.Error(w, "method not allowed", 405)
 	}
 }
 
@@ -1284,6 +1507,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Auto mode: pick this send's cell budget by recent success, then score the
+	// outcome so the next send learns from it.
+	budgetArm := h.applyBudget(ps)
+
 	res, err := chatc.SendMessage(ctx, peer, seq, text, progress)
 	if err != nil {
 		var serr *client.ChatStatusError
@@ -1294,6 +1521,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			res, err = chatc.SendMessage(ctx, peer, seq, text, progress)
 		}
 	}
+	// Score the budget by whether the cells reached the server: success or any
+	// server-status reply (replay/quota/…) means the transport worked; only a
+	// transport error (unreachable/timeout) is a budget failure.
+	h.recordBudget(ps, budgetArm, chatBudgetSuccess(err))
 	if err != nil {
 		key := chatStatusKey(err)
 		out := map[string]any{"ok": false, "error": key}

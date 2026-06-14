@@ -122,7 +122,13 @@ func authHandshake(t *testing.T, svc *ChatService, qk [protocol.KeySize]byte, ek
 
 func chatOp(t *testing.T, svc *ChatService, ref [protocol.ChatSelectorSize]byte, ks [protocol.KeySize]byte, ctr *uint32, plain []byte) (byte, []byte) {
 	t.Helper()
-	payload, err := protocol.SealChatCellPayload(ks, ref, *ctr, plain)
+	// Seal like the real client: budget 15 plus the deterministic jitter the
+	// server expects to subtract (none for OP_FRAG).
+	pad := protocol.ChatCellPlainSize
+	if protocol.ChatPlainOp(plain) != protocol.ChatOpFrag {
+		pad += protocol.ChatCellJitter(svc.queryKey, ref, *ctr)
+	}
+	payload, err := protocol.SealChatCellPayloadN(ks, ref, *ctr, plain, pad)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +164,63 @@ func TestChatAuthHandshakeAfterRegister(t *testing.T) {
 	ctr := uint32(0)
 	if st, _ := chatOp(t, svc, ref, ks, &ctr, protocol.BuildChatStatusPlain()); st != protocol.ChatStatusOK {
 		t.Fatalf("auth-session status st=%d", st)
+	}
+}
+
+// okAuth attempts an auth handshake against ekPub without failing the test,
+// reporting whether it yielded an OK session — used to assert a retired key no
+// longer authenticates.
+func okAuth(t *testing.T, svc *ChatService, qk [protocol.KeySize]byte, ekPub []byte, c simClient) bool {
+	t.Helper()
+	eph, _ := protocol.GenerateEphemeralKey()
+	ks, _ := protocol.ChatSessionKey(eph, ekPub, protocol.ChatProtocolVersion, qk)
+	tag := handshakeTag()
+	ts := uint32(time.Now().Unix())
+	kss, _ := protocol.ChatServerSharedKey(c.enc, ekPub, c.enc.PublicKey().Bytes(), ekPub)
+	proof := protocol.ChatAccountProof(kss, eph.PublicKey().Bytes(), c.addr, ts, simDomain)
+	boot := protocol.BuildChatAuthBootstrapPlain(c.addr, ts, proof)
+	sealedBoot := protocol.SealChat(ks, tag[:], protocol.ChatBootstrapCounter(), boot)
+	stream := protocol.BuildChatHandshakeStream(eph.PublicKey().Bytes(), protocol.ChatProtocolVersion, protocol.ChatHandshakeAuth, sealedBoot)
+	resp := feedStream(t, svc, tag, stream)
+	st, _, err := protocol.OpenChatResponse(ks, tag, protocol.ChatBootstrapCounter(), resp)
+	return err == nil && st == protocol.ChatStatusOK
+}
+
+// TestChatEkRotation: after rotation the new key authenticates, a client still
+// on the previous key authenticates during its grace window, and a key retired
+// past its grace no longer completes a handshake (forward secrecy boundary).
+func TestChatEkRotation(t *testing.T) {
+	svc, qk, ekPub0 := newChatSvc(t)
+	a := newSimClient(t)
+	registerHandshake(t, svc, qk, ekPub0, a) // account created under the original key
+
+	ekPub1, err := svc.RotateEk(time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ekPub1) == string(ekPub0) {
+		t.Fatal("rotation did not change the key")
+	}
+
+	// Both the new current key and the graced previous key authenticate.
+	for _, tc := range []struct {
+		name string
+		ek   []byte
+	}{{"current", ekPub1}, {"graced-previous", ekPub0}} {
+		ref, ks := authHandshake(t, svc, qk, tc.ek, a)
+		ctr := uint32(0)
+		if st, _ := chatOp(t, svc, ref, ks, &ctr, protocol.BuildChatStatusPlain()); st != protocol.ChatStatusOK {
+			t.Fatalf("%s key: auth st=%d", tc.name, st)
+		}
+	}
+
+	// Rotate again with zero grace → ekPub1 is retired immediately and dropped;
+	// a client still pinned to it can no longer handshake.
+	if _, err := svc.RotateEk(time.Now(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if okAuth(t, svc, qk, ekPub1, a) {
+		t.Fatal("a key retired past its grace still completed a handshake")
 	}
 }
 
@@ -241,7 +304,7 @@ func TestChatSendRoundTrip(t *testing.T) {
 
 	// B: ack (peer by handle) → inbox freed.
 	handle := protocol.ChatPeerHandle(a.addr)
-	if st, _ := chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatAckPlain(handle, m.Seq)); st != protocol.ChatStatusOK {
+	if st, _ := chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatAckPlain(handle, m.Seq, [protocol.ChatReceiptMACSize]byte{})); st != protocol.ChatStatusOK {
 		t.Fatalf("ack st=%d", st)
 	}
 	st, body = chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatStatusPlain())

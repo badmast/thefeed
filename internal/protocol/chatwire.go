@@ -56,8 +56,26 @@ const (
 	// ChatCellPlainSize is the max sealed plaintext (op + fields) per in-context
 	// cell (payload minus the seal tag).
 	ChatCellPlainSize = ChatCellPayloadSize - ChatSealTagSize // 15
-	// ChatDataChunkSize is the message-body bytes carried by one DATA cell.
+	// ChatDataChunkSize is the message-body bytes carried by one DATA cell at the
+	// default budget.
 	ChatDataChunkSize = ChatCellPlainSize - 2 // op(1)+idx(1)+chunk → 13
+
+	// ChatCellPlainMin / ChatCellPlainMax bound the configurable per-cell op
+	// plaintext budget B (RFC §8.2 — v1 constant, client-chosen). The default is
+	// ChatCellPlainSize (15); a client may pick any B in [min,max] to trade query
+	// length against query count. Floor = room for the smallest framing; ceiling =
+	// fits a single DNS label.
+	ChatCellPlainMin = 6
+	ChatCellPlainMax = 21
+	// ChatCellPayloadMax is the largest sealed cell payload (max budget + jitter +
+	// tag).
+	ChatCellPayloadMax = ChatCellPlainMax + ChatJitterMax + ChatSealTagSize
+	// ChatJitterMax bounds the deterministic per-cell length jitter (RFC §8.2):
+	// 0..ChatJitterMax extra zero-pad bytes inside the seal, so cells vary in
+	// length like the feed's 0-4 suffix instead of sitting at a single point. The
+	// pad is keyed by (selector, counter) so a retransmit reproduces the exact
+	// query name (resolver caches stay warm).
+	ChatJitterMax = 4
 
 	// ChatSelectorSize is exported for the session/selector layer.
 	ChatSelectorSize = chatSelectorSize
@@ -80,6 +98,10 @@ const (
 	ChatOpSendStart  = 6
 	ChatOpData       = 7
 	ChatOpFin        = 8
+	// ChatOpFrag carries one fragment of a control op too large for the current
+	// cell budget B (RFC §8.2): plaintext = op(1) ‖ idx(1) ‖ total(1) ‖ chunk.
+	// The server reassembles, then dispatches the inner op.
+	ChatOpFrag = 9
 )
 
 // Handshake kinds (the cleartext byte after the eph key in the stream).
@@ -100,11 +122,14 @@ const (
 	ChatStatusBusy             = 7
 	ChatStatusUnknownSession   = 8
 	ChatStatusBadAuth          = 9
-	ChatStatusNotFound         = 11
-	ChatStatusIncomplete       = 12
-	ChatStatusReplay           = 13
-	ChatStatusBadRequest       = 14
-	ChatStatusDisabled         = 15
+	// ChatStatusFragMore acks a non-final OP_FRAG cell: "fragment received, keep
+	// sending"; the cell that completes the op returns the inner op's status.
+	ChatStatusFragMore   = 10
+	ChatStatusNotFound   = 11
+	ChatStatusIncomplete = 12
+	ChatStatusReplay     = 13
+	ChatStatusBadRequest = 14
+	ChatStatusDisabled   = 15
 )
 
 // chatSelectorHandshakeBit marks a selector as a client-chosen handshake setup
@@ -213,14 +238,16 @@ func chatCellMask(queryKey [KeySize]byte, payload []byte) [chatSelectorSize + ch
 // ≤ ChatCellPayloadSize; it is zero-padded to the fixed cell length and the
 // selector+counter are masked so the whole name looks random.
 func EncodeChatCell(queryKey [KeySize]byte, mode QueryEncoding, selector [chatSelectorSize]byte, counter uint32, payload []byte, domain string) (string, error) {
-	if len(payload) > ChatCellPayloadSize {
+	if len(payload) > ChatCellPayloadMax {
 		return "", fmt.Errorf("chat cell payload too long: %d", len(payload))
 	}
-	raw := make([]byte, chatCellLen)
+	// The cell length follows the payload (selector+counter+payload), so a
+	// smaller budget yields a shorter query name.
+	raw := make([]byte, chatSelectorSize+chatCounterSize+len(payload))
 	copy(raw[:chatSelectorSize], selector[:])
 	putUint24(raw[chatSelectorSize:], counter)
 	copy(raw[chatSelectorSize+chatCounterSize:], payload)
-	mask := chatCellMask(queryKey, raw[chatSelectorSize+chatCounterSize:chatCellLen])
+	mask := chatCellMask(queryKey, raw[chatSelectorSize+chatCounterSize:])
 	for i := 0; i < chatSelectorSize+chatCounterSize; i++ {
 		raw[i] ^= mask[i]
 	}
@@ -235,29 +262,61 @@ func DecodeChatCell(queryKey [KeySize]byte, qname, domain string) (selector [cha
 	if e != nil {
 		return selector, 0, nil, e
 	}
-	if len(raw) < chatCellLen {
+	// Length-driven: payload is whatever follows selector+counter. Minimum is the
+	// smallest budget plus the seal tag, so a too-short name is rejected.
+	minLen := chatSelectorSize + chatCounterSize + ChatCellPlainMin + ChatSealTagSize
+	if len(raw) < minLen {
 		return selector, 0, nil, fmt.Errorf("chat cell too short: %d", len(raw))
 	}
-	mask := chatCellMask(queryKey, raw[chatSelectorSize+chatCounterSize:chatCellLen])
+	mask := chatCellMask(queryKey, raw[chatSelectorSize+chatCounterSize:])
 	for i := 0; i < chatSelectorSize+chatCounterSize; i++ {
 		raw[i] ^= mask[i]
 	}
 	copy(selector[:], raw[:chatSelectorSize])
 	counter = getUint24(raw[chatSelectorSize:])
-	payload = append([]byte(nil), raw[chatSelectorSize+chatCounterSize:chatCellLen]...)
+	payload = append([]byte(nil), raw[chatSelectorSize+chatCounterSize:]...)
 	return selector, counter, payload, nil
 }
 
-// SealChatCellPayload seals an op plaintext into a 19-byte cell payload (the
-// plaintext is zero-padded to the fixed plain size first, so every in-context
-// cell is the same length).
+// SealChatCellPayload seals an op plaintext into a default-budget (15-byte
+// plain, 19-byte payload) cell. Equivalent to SealChatCellPayloadN at the
+// default budget.
 func SealChatCellPayload(ksession [KeySize]byte, selector [chatSelectorSize]byte, counter uint32, plaintext []byte) ([]byte, error) {
-	if len(plaintext) > ChatCellPlainSize {
-		return nil, fmt.Errorf("chat op plaintext too long: %d", len(plaintext))
+	return SealChatCellPayloadN(ksession, selector, counter, plaintext, ChatCellPlainSize)
+}
+
+// SealChatCellPayloadN seals an op plaintext into a cell of the given budget B
+// (op plaintext bytes per cell): the plaintext is zero-padded to B before
+// sealing, so every cell at a given budget is the same length. B must be in
+// [ChatCellPlainMin, ChatCellPlainMax].
+func SealChatCellPayloadN(ksession [KeySize]byte, selector [chatSelectorSize]byte, counter uint32, plaintext []byte, budget int) ([]byte, error) {
+	// budget is the padded plaintext length: the op budget B, plus any jitter the
+	// caller folded in (so the ceiling is Max+JitterMax).
+	if budget < ChatCellPlainMin || budget > ChatCellPlainMax+ChatJitterMax {
+		return nil, fmt.Errorf("chat cell budget out of range: %d", budget)
 	}
-	pt := make([]byte, ChatCellPlainSize)
+	if len(plaintext) > budget {
+		return nil, fmt.Errorf("chat op plaintext %d exceeds budget %d", len(plaintext), budget)
+	}
+	pt := make([]byte, budget)
 	copy(pt, plaintext)
 	return SealChat(ksession, selector[:], counter, pt), nil
+}
+
+// ChatCellJitter returns the deterministic extra-pad length (0..ChatJitterMax)
+// for a cell, keyed by the query key and the cell's (selector, counter). Both
+// ends compute it identically, so the client pads to budget+jitter and the
+// server recovers the real budget by subtracting it — and a byte-identical
+// retransmit reproduces the same query name. OP_FRAG cells pass jitter=0 (a
+// fragment's chunk is concatenated, so trailing pad can't ride along).
+func ChatCellJitter(queryKey [KeySize]byte, selector [chatSelectorSize]byte, counter uint32) int {
+	h := hmac.New(sha256.New, queryKey[:])
+	h.Write([]byte("thefeed-chat-jitter-v1"))
+	h.Write(selector[:])
+	var cb [4]byte
+	binary.BigEndian.PutUint32(cb[:], counter)
+	h.Write(cb[:])
+	return int(h.Sum(nil)[0]) % (ChatJitterMax + 1)
 }
 
 // OpenChatCellPayload reverses SealChatCellPayload, returning the fixed-size
@@ -280,9 +339,14 @@ func BuildChatFetchPlain(peer [ChatPeerHandleSize]byte, seq uint32, block uint8)
 	return append(appendUint32(out, seq), block)
 }
 
-// BuildChatAckPlain: ACK peer's messages up to upToSeq (peer by handle).
-func BuildChatAckPlain(peer [ChatPeerHandleSize]byte, upToSeq uint32) []byte {
-	return appendUint24(append([]byte{chatHdr(ChatOpAck)}, peer[:]...), upToSeq)
+// BuildChatAckPlain: ACK peer's messages up to upToSeq (peer by handle). The
+// receipt is the recipient's E2E proof of delivery (ChatReceiptMAC); it rides
+// the spare cell bytes (op1+handle4+seq3+receipt6 = 14 ≤ 15). An all-zero
+// receipt means "no proof" — the ack still frees quota, the sender just won't
+// see a verified ✓✓.
+func BuildChatAckPlain(peer [ChatPeerHandleSize]byte, upToSeq uint32, receipt [ChatReceiptMACSize]byte) []byte {
+	out := appendUint24(append([]byte{chatHdr(ChatOpAck)}, peer[:]...), upToSeq)
+	return append(out, receipt[:]...)
 }
 
 // BuildChatSendStatusPlain: ✓/✓✓ counters for own messages to peer. The full
@@ -304,7 +368,9 @@ func BuildChatSendStartPlain(dst [AddressSize]byte, totalLen uint16) []byte {
 
 // BuildChatDataPlain: one body chunk at index.
 func BuildChatDataPlain(idx uint8, chunk []byte) ([]byte, error) {
-	if len(chunk) > ChatDataChunkSize {
+	// A DATA cell is op(1)+idx(1)+chunk, so the chunk is bounded by the largest
+	// budget (the client chunks to its own budget-2; see ChatClient.budget).
+	if len(chunk) > ChatCellPlainMax-2 {
 		return nil, fmt.Errorf("chat chunk too big: %d", len(chunk))
 	}
 	return append([]byte{chatHdr(ChatOpData), idx}, chunk...), nil
@@ -313,6 +379,12 @@ func BuildChatDataPlain(idx uint8, chunk []byte) ([]byte, error) {
 // BuildChatFinPlain: commit the upload (crc over the assembled body).
 func BuildChatFinPlain(crc uint32) []byte {
 	return appendUint32([]byte{chatHdr(ChatOpFin)}, crc)
+}
+
+// BuildChatFragPlain: one fragment (idx of total) of an inner op too big for the
+// budget. chunk ≤ budget-3 (op+idx+total).
+func BuildChatFragPlain(idx, total uint8, chunk []byte) []byte {
+	return append([]byte{chatHdr(ChatOpFrag), idx, total}, chunk...)
 }
 
 // ---- op plaintext parsers ----
@@ -341,15 +413,21 @@ func ParseChatFetchPlain(pt []byte) (*ChatFetch, error) {
 type ChatAck struct {
 	Peer    [ChatPeerHandleSize]byte
 	UpToSeq uint32
+	Receipt [ChatReceiptMACSize]byte // E2E delivery proof; zero if none
 }
 
-// ParseChatAckPlain parses an ACK plaintext.
+// ParseChatAckPlain parses an ACK plaintext. The receipt is optional (a
+// zero-value Receipt is returned if absent) so the op stays parseable even
+// without proof.
 func ParseChatAckPlain(pt []byte) (*ChatAck, error) {
 	if len(pt) < 1+ChatPeerHandleSize+3 {
 		return nil, fmt.Errorf("chat ack: short")
 	}
 	a := &ChatAck{UpToSeq: getUint24(pt[1+ChatPeerHandleSize:])}
 	copy(a.Peer[:], pt[1:])
+	if rcptOff := 1 + ChatPeerHandleSize + 3; len(pt) >= rcptOff+ChatReceiptMACSize {
+		copy(a.Receipt[:], pt[rcptOff:])
+	}
 	return a, nil
 }
 
@@ -381,6 +459,22 @@ func ParseChatKeyFetchPlain(pt []byte) (*ChatKeyFetch, error) {
 	k := &ChatKeyFetch{}
 	copy(k.Addr[:], pt[1:])
 	return k, nil
+}
+
+// ChatFrag is a parsed OP_FRAG.
+type ChatFrag struct {
+	Index uint8
+	Total uint8
+	Chunk []byte
+}
+
+// ParseChatFragPlain parses an OP_FRAG plaintext (op already padded to budget,
+// so trailing pad is harmless — the reassembler trims to the inner op length).
+func ParseChatFragPlain(pt []byte) (*ChatFrag, error) {
+	if len(pt) < 3 {
+		return nil, fmt.Errorf("chat frag: short")
+	}
+	return &ChatFrag{Index: pt[1], Total: pt[2], Chunk: append([]byte(nil), pt[3:]...)}, nil
 }
 
 // ChatSendStart is a parsed SEND_START.
