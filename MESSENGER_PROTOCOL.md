@@ -290,6 +290,16 @@ are all unaffected by `B`.
 **Setting.** One **global** user setting: three fixed presets — **Compact /
 Standard / Wide** — over `B ∈ [6, 21]`, plus **Auto** (the **default**).
 
+**Auto mode.** Per server, Auto scores each preset by the **queries it spends per
+message and how many of them error** (the fetcher's success/failure delta across
+the send) — *not* by success alone, and not by latency. Cost = queries +
+weighted errors, with a penalty if the send failed; the cheapest mode is
+exploited, epsilon-greedy exploration keeps every mode measured (Compact is tried
+last and, on a weak path, ranked out so it can't flood), and an unused mode is
+re-measured after a while. This is what makes Auto safe on weak resolvers, where
+Compact's fragmentation multiplies queries: the score sees the cost and avoids
+it. The UI shows each mode's recent queries/errors.
+
 **Auto mode.** Per server (each network path scores independently), Auto measures
 each preset by recent send success and prefers the best while never abandoning
 the others. A send "succeeds" for its budget if the cells reached the server

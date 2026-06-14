@@ -36,7 +36,8 @@ var chatState = {
   curServer: '', // server the open conversation currently sends via
   safetyOpen: false, // inline safety-code explainer expanded
   connecting: false, // "connecting…" indicator currently shown for the in-flight send
-  sendConnTimer: null // delayed reveal of the "connecting…" indicator
+  sendConnTimer: null, // delayed reveal of the "connecting…" indicator
+  statusChecking: false // a peer-status probe is in flight (prevent pile-up)
 };
 
 // First-run server guidance: while NO chat server is enabled, every messenger
@@ -248,12 +249,11 @@ function chatStartForegroundTimer() {
 
 function chatForegroundPoll() {
   if (!chatState.open) { chatStopForegroundTimer(); return; }
-  // If chat is currently unavailable (e.g. the server was rebooting), keep
-  // re-probing so the banner clears itself when the server returns — the user
-  // shouldn't have to leave and re-enter to recover.
+  if (chatState.polling) return;
   if (chatState.info && chatState.info.exists && !chatAvailable()) chatCheckAvailability();
   var peer = chatState.peer;
-  if (chatState.view === 'thread' && peer) chatRefreshStatus(peer);
+  if (chatState.view === 'thread' && peer && !chatState.sending) chatRefreshStatus(peer);
+  chatState.polling = true;
   fetch('/api/chat/poll', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
     chatHidePollProgress();
     if (d && d.ok && d.got > 0) {
@@ -262,7 +262,7 @@ function chatForegroundPoll() {
       chatLoadThreads();
       if (chatState.view === 'thread' && chatState.peer === peer) chatRenderThread();
     }
-  }).catch(function () { chatHidePollProgress(); });
+  }).catch(function () { chatHidePollProgress(); }).finally(function () { chatState.polling = false; });
 }
 
 function chatUpdateCountdown() {
@@ -1071,7 +1071,7 @@ function chatListMenu() {
 function chatCellSizeSheet() {
   fetch('/api/chat/settings').then(function (r) { return r.json(); }).then(function (cur) {
     var presets = cur.presets || { compact: 8, standard: 15, wide: 21 };
-    var byBudget = chatBudgetScores(cur.scores); // budget -> {score, used}
+    var byBudget = chatBudgetScores(cur.scores); // budget -> {queries, errors, used}
     var opts = [
       { key: 'auto', label: chatT('chat_size_auto'), hint: chatT('chat_size_auto_hint') },
       { key: 'compact', label: chatT('chat_size_compact'), hint: chatT('chat_size_compact_hint') },
@@ -1086,11 +1086,16 @@ function chatCellSizeSheet() {
       '<div class="chat-sheet-hint">' + esc(chatT('chat_query_size_hint')) + '</div>';
     opts.forEach(function (p) {
       var on = cur && cur.mode === p.key;
-      // In auto mode show each preset's live score next to it.
+      // In auto mode show each preset's recent cost: queries per message (and
+      // errors when present) — lower is better, which is how auto ranks them.
       var score = '';
       if (cur.mode === 'auto' && p.key !== 'auto') {
         var sc = byBudget[presets[p.key]];
-        if (sc && sc.used > 0) score = '<span class="chat-score">' + Math.round(sc.score * 100) + '%</span>';
+        if (sc && sc.used > 0) {
+          var label = Math.round(sc.queries) + chatT('chat_size_q');
+          if (sc.errors >= 0.5) label += ' · ' + Math.round(sc.errors) + chatT('chat_size_err');
+          score = '<span class="chat-score">' + esc(label) + '</span>';
+        }
       }
       items += '<button class="chat-sheet-item' + (on ? ' chat-sheet-on' : '') +
         '" onclick="chatSetCellSize(\'' + p.key + '\')">' + (on ? icon('tickSingle') + ' ' : '') +
@@ -1102,19 +1107,19 @@ function chatCellSizeSheet() {
   }).catch(function () { showToast(chatT('chat_err_generic')); });
 }
 
-// chatBudgetScores flattens the per-server auto scores into one budget->score
-// map (averaged across servers that have a sample), for display.
+// chatBudgetScores averages the per-server auto stats into one budget ->
+// {queries, errors, used} map for display.
 function chatBudgetScores(scores) {
-  var acc = {}; // budget -> {sum, n, used}
+  var acc = {}; // budget -> {q, e, n, used}
   Object.keys(scores || {}).forEach(function (k) {
     (scores[k] || []).forEach(function (a) {
       if (!a.used) return;
-      var e = acc[a.budget] || (acc[a.budget] = { sum: 0, n: 0, used: 0 });
-      e.sum += a.score; e.n++; e.used += a.used;
+      var x = acc[a.budget] || (acc[a.budget] = { q: 0, e: 0, n: 0, used: 0 });
+      x.q += a.queries; x.e += a.errors; x.n++; x.used += a.used;
     });
   });
   var out = {};
-  Object.keys(acc).forEach(function (b) { out[b] = { score: acc[b].sum / acc[b].n, used: acc[b].used }; });
+  Object.keys(acc).forEach(function (b) { out[b] = { queries: acc[b].q / acc[b].n, errors: acc[b].e / acc[b].n, used: acc[b].used }; });
   return out;
 }
 
@@ -1293,7 +1298,6 @@ async function chatRenderThread() {
   chatState.msgCount = msgs.length;
   if (!keepScroll) chatState.seenCount = msgs.length;
   if (body) body.onscroll = chatUpdateScrollBtn;
-  chatBindPullRefresh(body);
   chatUpdateScrollBtn();
   // Restore the in-progress draft + caret before resizing the input.
   var inp = document.getElementById('chatInput');
@@ -1620,11 +1624,15 @@ async function chatFetchPeerStatus(addr, server) {
 // server it still has an undelivered message on, so ✓✓ lands even after the
 // user switched the conversation to a different server mid-thread.
 async function chatRefreshStatus(addr) {
-  await chatFetchPeerStatus(addr, '');
-  var pend = chatState.pendingServers[addr] || [];
-  for (var i = 0; i < pend.length; i++) {
-    if (pend[i] && pend[i] !== chatState.curServer) await chatFetchPeerStatus(addr, pend[i]);
-  }
+  if (!addr || chatState.statusChecking) return;
+  chatState.statusChecking = true;
+  try {
+    await chatFetchPeerStatus(addr, '');
+    var pend = chatState.pendingServers[addr] || [];
+    for (var i = 0; i < pend.length; i++) {
+      if (pend[i] && pend[i] !== chatState.curServer) await chatFetchPeerStatus(addr, pend[i]);
+    }
+  } finally { chatState.statusChecking = false; }
 }
 
 async function sendChatMessage() {
@@ -1661,27 +1669,22 @@ async function sendChatMessage() {
     });
     var d = await r.json();
     if (d.ok) {
-      // Mark the send finished BEFORE re-rendering so chatRenderThread won't
-      // re-disable the row, repaint a stale bar, or restore the sent draft.
       chatState.sending = false;
       chatState.sendProg = null;
-      // Clear the draft at the source of truth so the upcoming re-render (and
-      // any background render still in flight) restores an empty box instead of
-      // the just-sent text. Also clear the live element for instant feedback.
-      chatState.draft = '';
-      var liveInp = document.getElementById('chatInput');
-      if (liveInp) liveInp.value = '';
       if (d.remaining != null) chatState.quota = { remaining: d.remaining, resetUnix: d.resetUnix };
-      delete chatState.pendingServer[peerAddr]; // thread is now bound to its server
-      chatBumpActivity(); // active conversation → poll faster for the reply
-      await chatRenderThread();
-      chatScrollToBottom(); // jump to your just-sent message, like Telegram
-      // Nudge the delivery status: ✓ (accepted) is immediate; ✓✓ lands once
-      // the recipient polls. The thread timer keeps refreshing after that.
-      var peer = chatState.peer;
-      chatRefreshStatus(peer);
-      setTimeout(function () { if (chatState.peer === peer) chatRefreshStatus(peer); }, 3000);
-      setTimeout(function () { if (chatState.peer === peer) chatRefreshStatus(peer); }, 8000);
+      delete chatState.pendingServer[peerAddr];
+      chatBumpActivity();
+      var stillViewing = chatState.view === 'thread' && chatState.peer === peerAddr;
+      if (stillViewing) {
+        chatState.draft = '';
+        var liveInp = document.getElementById('chatInput');
+        if (liveInp) liveInp.value = '';
+        await chatRenderThread();
+        chatScrollToBottom();
+        chatRefreshStatus(peerAddr);
+        setTimeout(function () { if (chatState.peer === peerAddr) chatRefreshStatus(peerAddr); }, 3000);
+        setTimeout(function () { if (chatState.peer === peerAddr) chatRefreshStatus(peerAddr); }, 8000);
+      }
     } else {
       var msg = chatT(d.error || 'chat_err_generic');
       if (d.error === 'chat_err_rate_limited' && d.resetUnix) {

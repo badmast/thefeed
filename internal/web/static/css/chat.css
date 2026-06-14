@@ -103,9 +103,11 @@
   align-items: center;
   gap: 8px;
   padding: 4px 14px;
-  min-height: 18px;
+  height: 26px;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--surface)
+  background: var(--surface);
+  overflow: hidden
 }
 
 .chat-next-poll {
@@ -295,7 +297,7 @@
 .chat-body {
   flex: 1;
   overflow-y: auto;
-  padding: 14px
+  padding: 14px 14px 2px
 }
 
 /* Floating "jump to latest" button — sits above the composer, hidden while at

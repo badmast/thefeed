@@ -224,8 +224,8 @@ func newChatHub(s *Server, dataDir string) *chatHub {
 		contacts:   make(map[string]string),
 		threads:    make(map[string]*chatThreadFile),
 		enabled:    make(map[string]bool),
-		budget:     protocol.ChatCellPlainSize, // fixed-mode fallback (Standard)
-		budgetMode: chatBudgetModeAuto,         // default: adaptively pick the best
+		budget:     protocol.ChatCellPlainSize, // Standard preset (fixed-mode fallback)
+		budgetMode: chatBudgetModeAuto,         // default: cost-scored adaptive pick
 	}
 	h.loadState()
 	return h
@@ -310,14 +310,15 @@ func chatBudgetSuccess(err error) bool {
 	return errors.As(err, &serr)
 }
 
-// recordBudget folds a send outcome into the server's scorer (auto mode only).
-func (h *chatHub) recordBudget(ps *perServerChat, arm int, success bool) {
+// recordBudget folds a send's query/error counts into the server's scorer (auto
+// mode only).
+func (h *chatHub) recordBudget(ps *perServerChat, arm, queries, errs int, success bool) {
 	if arm < 0 {
 		return
 	}
 	h.mu.Lock()
 	if ps.scorer != nil {
-		ps.scorer.record(arm, success, time.Now())
+		ps.scorer.record(arm, queries, errs, success, time.Now())
 	}
 	h.mu.Unlock()
 }
@@ -1507,9 +1508,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Auto mode: pick this send's cell budget by recent success, then score the
-	// outcome so the next send learns from it.
+	// Auto mode: pick this send's cell budget, then score it by the queries it
+	// spent and how many errored — measured as the fetcher's success/failure
+	// delta across the send.
 	budgetArm := h.applyBudget(ps)
+	resp0, err0 := ps.f.QueryTotals()
 
 	res, err := chatc.SendMessage(ctx, peer, seq, text, progress)
 	if err != nil {
@@ -1521,10 +1524,12 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			res, err = chatc.SendMessage(ctx, peer, seq, text, progress)
 		}
 	}
-	// Score the budget by whether the cells reached the server: success or any
-	// server-status reply (replay/quota/…) means the transport worked; only a
-	// transport error (unreachable/timeout) is a budget failure.
-	h.recordBudget(ps, budgetArm, chatBudgetSuccess(err))
+	resp1, err1 := ps.f.QueryTotals()
+	// queries spent and lost this send; "success" (cells reached the server, incl.
+	// a server-status reply) vs a transport failure tips the failure penalty.
+	queries := int((resp1 - resp0) + (err1 - err0))
+	errs := int(err1 - err0)
+	h.recordBudget(ps, budgetArm, queries, errs, chatBudgetSuccess(err))
 	if err != nil {
 		key := chatStatusKey(err)
 		out := map[string]any{"ok": false, "error": key}

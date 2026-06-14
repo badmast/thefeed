@@ -481,6 +481,20 @@ func (f *Fetcher) ResetStats() {
 	f.log("resolver scoreboard reset")
 }
 
+// QueryTotals returns cumulative (responses, errors) summed across all
+// resolvers. Snapshotting the delta around an operation tells the caller how
+// many queries it issued (responses+errors) and how many were lost (errors) —
+// the same success/failure signal the resolver scoreboard is built on.
+func (f *Fetcher) QueryTotals() (responses, errs int64) {
+	f.stats.Range(func(_, val any) bool {
+		s := val.(*resolverStat)
+		responses += atomic.LoadInt64(&s.success)
+		errs += atomic.LoadInt64(&s.failure)
+		return true
+	})
+	return
+}
+
 // ExportStats returns a snapshot of all resolver stats.
 func (f *Fetcher) ExportStats() map[string][3]int64 {
 	out := make(map[string][3]int64)
