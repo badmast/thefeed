@@ -1869,16 +1869,15 @@ function chatHideProgress(id) {
   if (label) label.textContent = '';
 }
 
-function chatShowHandshakeProgress(done, total) {
+function chatShowHandshakeProgress(done) {
   var bar = document.getElementById('chatSendProgress');
   if (!bar) return;
-  if (done >= total) { return; }
   bar.classList.add('active');
-  bar.classList.remove('indeterminate');
+  bar.classList.add('indeterminate');
   var fill = document.getElementById('chatSendProgressFill');
+  if (fill) fill.style.width = '100%';
   var label = document.getElementById('chatSendProgressLabel');
-  if (fill) fill.style.width = (Math.round(done * 100 / total) + '%');
-  if (label) label.textContent = chatT('chat_connecting') + ' ' + done + '/' + total;
+  if (label) label.textContent = chatT('chat_connecting') + ' ' + done + '↑';
 }
 
 // Receive/poll progress can be shown in either view (list has chatPollProgress,
@@ -1899,7 +1898,7 @@ function chatOnSSE(data) {
     if (data.op === 'handshake') {
       clearTimeout(chatState.sendConnTimer);
       chatState.connecting = false;
-      chatShowHandshakeProgress(data.done, data.total);
+      chatShowHandshakeProgress(data.done);
     }
     else if (data.op === 'send') {
       chatState.sendProg = { done: data.done, total: data.total };
