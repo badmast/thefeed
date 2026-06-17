@@ -48,6 +48,12 @@ var defaultProfiles = []defaultProfile{
 			b64("Y2cyLmZlZWR0aGVmZWVkLnN0b3Jl"),
 		},
 	},
+	{
+		Nickname:  "توییتر",
+		Domain:    b64("dC5oYXBweWxldHMud2lu"),
+		Key:       b64("SXJhbmVBemFk"),
+		ServerKey: "P13ug6RkRVySwdPJY-ba3JYms7HoeWj49YkTLgANG8w",
+	},
 }
 
 // b64 decodes a base64 literal; returns "" on malformed input.

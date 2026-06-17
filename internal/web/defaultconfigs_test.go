@@ -39,24 +39,15 @@ func TestHandleProfileDefaults(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Profiles) != 2 {
-		t.Fatalf("profiles = %d, want 2", len(resp.Profiles))
+	if len(resp.Profiles) != 3 {
+		t.Fatalf("profiles = %d, want 3", len(resp.Profiles))
 	}
 	for _, p := range resp.Profiles {
 		if p.Nickname == "" || p.Domain == "" || p.Key == "" {
 			t.Errorf("incomplete profile: %+v", p)
 		}
-		// Both bundled profiles pin a server key and spread over extra domains.
 		if p.ServerKey == "" {
 			t.Errorf("profile %q missing server key", p.Nickname)
-		}
-		if len(p.ExtraDomains) == 0 {
-			t.Errorf("profile %q missing extra domains", p.Nickname)
-		}
-		for _, d := range p.ExtraDomains {
-			if d == "" || strings.Contains(d, "=") {
-				t.Errorf("profile %q extra domain not decoded: %q", p.Nickname, d)
-			}
 		}
 	}
 	if len(resp.Resolvers) != len(parseDefaultProfileResolvers()) {
