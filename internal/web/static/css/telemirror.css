@@ -169,18 +169,18 @@
         display: inline-flex
       }
 
-      /* Instant drawer, NO slide transition. The transform transition is
-         unpromoted and janky on Android WebView; promoting it with will-change
-         fixed nothing and blanked the post images (a WebView layerization bug).
-         Snapping open/closed is fast and side-effect-free. */
+      /* Instant drawer, NO slide transition and NO blurred shadow. The transform
+         transition was janky on Android WebView; will-change blanked the post
+         images; and the big 24px-blur box-shadow took ~1s to rasterize on open
+         (the "tap → 1s → drawer appears" lag). The backdrop darkening plus the
+         panel's own border separate it from the content cheaply. */
       .tm-sidebar {
         position: absolute;
         top: 0;
         bottom: 0;
         width: 86%;
         max-width: 340px;
-        z-index: 2;
-        box-shadow: 0 0 0 rgba(0, 0, 0, .0)
+        z-index: 2
       }
 
       /* LTR: slide in from the left. */
@@ -191,8 +191,7 @@
       }
 
       html[dir="ltr"] .tm-sidebar.open {
-        transform: translateX(0);
-        box-shadow: 4px 0 24px rgba(0, 0, 0, .32)
+        transform: translateX(0)
       }
 
       /* RTL: slide in from the right (where the channel list belongs). */
@@ -203,8 +202,7 @@
       }
 
       html[dir="rtl"] .tm-sidebar.open {
-        transform: translateX(0);
-        box-shadow: -4px 0 24px rgba(0, 0, 0, .32)
+        transform: translateX(0)
       }
 
       .tm-backdrop {
