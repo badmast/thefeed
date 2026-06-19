@@ -387,10 +387,6 @@
     }
 
     .tm-post {
-      /* Skip layout/paint of off-screen posts so opening the feed doesn't render
-         the whole channel at once; contain-intrinsic-size estimates their height. */
-      content-visibility: auto;
-      contain-intrinsic-size: auto 400px;
       max-width: 720px;
       width: 100%;
       margin: 0 auto;
