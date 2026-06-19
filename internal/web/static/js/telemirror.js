@@ -271,7 +271,7 @@
       // Always request the stable server URL. Server returns 404 if no
       // avatar is cached — onerror then falls back to the initial.
       var src = '/api/telemirror/avatar/' + encodeURIComponent(key);
-      inner = '<img src="' + tmEscAttr(src) + '" loading="lazy" alt=""'
+      inner = '<img src="' + tmEscAttr(src) + '" loading="lazy" decoding="async" alt=""'
         + ' onerror="tmAvatarLoadFailed(this, \'' + tmEscAttr(key) + '\')">'
         + initial;
     }
@@ -748,7 +748,7 @@
     if (m.type === 'photo' && m.thumb) {
       var fname = 'photo-' + (postIdx + 1) + '-' + (mediaIdx + 1) + '.jpg';
       return '<div class="tm-photo">'
-        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" alt=""'
+        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
         + ' onclick="tmOpenLightbox(\'' + tmEscAttr(m.thumb) + '\')"'
         + ' style="cursor:zoom-in"'
@@ -786,7 +786,7 @@
     }
     if (m.type === 'sticker' && m.thumb) {
       return '<div class="tm-sticker">'
-        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" alt=""'
+        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
         + ' onerror="this.parentNode.classList.add(\'tm-photo-failed\')">'
         + '</div>';
