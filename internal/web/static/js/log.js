@@ -250,7 +250,7 @@ async function doRefresh(quiet) {
     if (selectedChannel > 0) url += '?channel=' + selectedChannel;
     if (quiet) url += (url.includes('?') ? '&' : '?') + 'quiet=1';
     await fetch(url, { method: 'POST' });
-    if (!quiet && selectedChannel > 0) setTimeout(function () { loadChannels(); loadMessages(selectedChannel) }, 3000);
+    if (!quiet && selectedChannel > 0) setTimeout(function () { loadChannels(); if (_chatPanelVisible()) loadMessages(selectedChannel) }, 3000);
   } catch (e) { }
 }
 

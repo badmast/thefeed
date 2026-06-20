@@ -1,5 +1,6 @@
 // ===== STATE =====
 var selectedChannel = 0, channels = [], eventSource = null, autoRefreshTimer = null, telegramLoggedIn = false, logVisible = false;
+var _selectGen = 0;
 // previousMsgIDs is kept for the "no_new_messages" toast on refresh.
 // previousContentHashes drives the channel-list NEW badge — robust across
 // both Telegram (monotonic IDs) and X accounts (CRC32-hashed snowflake
@@ -128,6 +129,7 @@ function openChat() {
 }
 function openSidebar() {
   chatIsOpen = false;
+  _selectGen++;
   document.getElementById('app').classList.remove('chat-open');
 }
 // feedBack: the content pane's back button. Remove chat-open directly — the feed

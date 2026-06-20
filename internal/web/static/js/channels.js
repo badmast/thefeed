@@ -360,6 +360,7 @@ async function selectChannel(num) {
     }
     setLastSeenTimestamp(prevName, currentMaxTimestamp);
   }
+  var gen = ++_selectGen;
   selectedChannel = num;
   currentMaxMsgID = 0;
   currentMaxTimestamp = 0;
@@ -375,6 +376,8 @@ async function selectChannel(num) {
   document.getElementById('messages').innerHTML = '<div class="empty-state"><p>' + t('loading') + '</p></div>';
   document.getElementById('scrollDownBtn').classList.remove('visible');
   await loadMessages(num);
+  // Bail if user navigated away while we were loading
+  if (gen !== _selectGen) return;
   // Show progress bar and mark channel as refreshing so the bar persists
   // through the metadata fetch + channel fetch (~5 s). The bar is removed
   // when the SSE update arrives with fresh data for this channel.
