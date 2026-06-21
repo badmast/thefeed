@@ -431,8 +431,8 @@ function showInputDialog(opts) {
 // triggerDownload saves a blob to the user's device. On iOS WKWebView the
 // <a download> attribute is ignored, so we use the Web Share API instead.
 function triggerDownload(blob, filename) {
-  // Ensure the filename has an extension — iOS share sheet uses it
-  // literally, unlike <a download> which can infer from MIME type.
+  // Ensure the filename has an extension — iOS share sheet and Android
+  // bridge use it literally, unlike <a download> which infers from MIME.
   if (filename && filename.indexOf('.') === -1 && blob.type) {
     var ext = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
       'image/webp': '.webp', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
@@ -443,6 +443,19 @@ function triggerDownload(blob, filename) {
     }
     if (ext) filename += ext;
   }
+  // Android bridge: reliable save to Downloads with a toast showing the path.
+  var bridge = (typeof window !== 'undefined' && window.Android) ? window.Android : null;
+  if (bridge && typeof bridge.saveMedia === 'function') {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var b64 = (reader.result || '').split(',')[1] || '';
+      try { bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename); }
+      catch (e) { showToast('Save failed'); }
+    };
+    reader.readAsDataURL(blob);
+    return;
+  }
+  // iOS WKWebView: <a download> is ignored, use Web Share API instead.
   if (navigator.share && navigator.canShare) {
     try {
       var file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });

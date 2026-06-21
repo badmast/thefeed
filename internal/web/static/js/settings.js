@@ -583,7 +583,9 @@ function doBackupExport() {
     return r.blob();
   }).then(function (blob) {
     triggerDownload(blob, 'thefeed-backup.tfbak');
-    showToast(t('backup_exported') || 'Backup exported');
+    if (!(window.Android && window.Android.saveMedia)) {
+      showToast(t('backup_exported') || 'Backup exported');
+    }
   }).catch(function (e) {
     showToast(e.message || 'Export failed');
   }).finally(function () {
