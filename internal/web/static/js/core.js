@@ -247,6 +247,14 @@ async function loadFontSize() {
     } else if (s.scanPromptOff === false) {
       localStorage.removeItem('thefeed_scan_prompt_off');
     }
+    // Mirror-note dismissal is server-persisted too (survives a new client
+    // port). Mirror it into localStorage + hide the note if already dismissed.
+    if (s.mirrorNoteOff === true) {
+      try { localStorage.setItem('tm_note_off', '1'); } catch (e) { }
+      if (typeof applyTmNoteState === 'function') applyTmNoteState();
+    } else if (s.mirrorNoteOff === false) {
+      try { localStorage.removeItem('tm_note_off'); } catch (e) { }
+    }
     // Populate pinned channels from the server response (per-profile).
     pinnedChannels = new Set();
     if (Array.isArray(s.pinnedChannels)) {
@@ -548,9 +556,13 @@ function showInfoDialog(msg, okText) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '99990'; // above the floating nav (9300) and section panes
     overlay.innerHTML = '<div class="modal" style="max-width:380px"><p style="font-size:13px;color:var(--text);margin-bottom:16px;line-height:1.6;white-space:pre-line">' + esc(msg) + '</p><div class="modal-actions"><button class="btn btn-primary" id="infoOk">' + esc(okText || t('ok') || 'OK') + '</button></div></div>';
     document.body.appendChild(overlay);
-    document.getElementById('infoOk').onclick = function () { document.body.removeChild(overlay); resolve(true) };
+    function close() { if (overlay.parentNode) document.body.removeChild(overlay); resolve(true); }
+    document.getElementById('infoOk').onclick = close;
+    // Tap outside the card (on the backdrop) also dismisses.
+    overlay.onclick = function (e) { if (e.target === overlay) close(); };
   });
 }
 

@@ -170,6 +170,14 @@ function tmDismissNote() {
   var w = document.getElementById('tmDisclaimerWrap');
   if (w) w.style.display = 'none';
   try { localStorage.setItem('tm_note_off', '1'); } catch (e) { }
+  // Persist server-side too: localStorage is per-origin, so a client that comes
+  // up on a new port would otherwise re-show the note (see ScanPromptOff).
+  try {
+    fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mirrorNoteOff: true })
+    }).catch(function () { });
+  } catch (e) { }
 }
 
 function applyTmNoteState() {

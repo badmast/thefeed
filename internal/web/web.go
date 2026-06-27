@@ -123,6 +123,12 @@ type ProfileList struct {
 	// origin → flag was lost on every restart).
 	ScanPromptOff bool `json:"scanPromptOff,omitempty"`
 
+	// MirrorNoteOff suppresses the Mirror (Telemirror) disclaimer note once the
+	// user dismisses it. Persisted server-side for the same reason as
+	// ScanPromptOff: a fresh client port has empty localStorage and would
+	// otherwise re-show the note on every launch.
+	MirrorNoteOff bool `json:"mirrorNoteOff,omitempty"`
+
 	// ProfilePicsEnabled enables fetching avatars over DNS when the
 	// GitHub relay can't serve them. Off by default.
 	ProfilePicsEnabled bool `json:"profilePicsEnabled,omitempty"`

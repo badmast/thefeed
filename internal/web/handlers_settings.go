@@ -40,6 +40,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"theme":              pl.Theme,
 			"lang":               pl.Lang,
 			"scanPromptOff":      pl.ScanPromptOff,
+			"mirrorNoteOff":      pl.MirrorNoteOff,
 			"profilePicsEnabled": pl.ProfilePicsEnabled,
 			"skipUpdateVersion":  pl.SkipUpdateVersion,
 			"queryMode":          qm,
@@ -60,6 +61,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Theme              *string  `json:"theme"`
 			Lang               *string  `json:"lang"`
 			ScanPromptOff      *bool    `json:"scanPromptOff"`
+			MirrorNoteOff      *bool    `json:"mirrorNoteOff"`
 			ProfilePicsEnabled *bool    `json:"profilePicsEnabled"`
 			SkipUpdateVersion  *string  `json:"skipUpdateVersion"`
 			QueryMode          *string  `json:"queryMode"`
@@ -100,6 +102,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Lang != nil && (*req.Lang == "fa" || *req.Lang == "en") {
 			pl.Lang = *req.Lang
+		}
+		if req.MirrorNoteOff != nil {
+			pl.MirrorNoteOff = *req.MirrorNoteOff
 		}
 		if req.ScanPromptOff != nil {
 			pl.ScanPromptOff = *req.ScanPromptOff
