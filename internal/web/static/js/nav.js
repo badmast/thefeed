@@ -249,7 +249,12 @@ function initPullToRefresh() {
   var startY = 0, dist = 0, active = false, refreshing = false;
   var THRESH = 62, MAX = 90;
 
-  function place() { ind.style.top = list.offsetTop + 'px'; }
+  function place() {
+    // Start the spinner just below the floating header, not at the very top
+    // (where the transparent header overlaps it).
+    var hh = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--feed-header-h')) || 0;
+    ind.style.top = (list.offsetTop + hh) + 'px';
+  }
   function paint() {
     ind.style.opacity = String(Math.min(1, dist / THRESH));
     ind.style.transform = 'translateX(-50%) translateY(' + (dist - 26) + 'px) rotate(' + (dist * 4) + 'deg)';

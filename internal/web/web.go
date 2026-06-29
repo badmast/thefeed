@@ -479,7 +479,12 @@ func (s *Server) serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 
 	staticSub, _ := fs.Sub(staticFS, "static")
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	// no-store on the code assets (JS/CSS): the Android/iOS WebView pins a stable
+	// localhost port (to keep localStorage), so it would otherwise cache these
+	// across app updates and serve STALE JS against NEW index.html — a version
+	// mismatch that breaks init (blank screen, un-hydrated icons). The server is
+	// in-process, so refetching every load is effectively free.
+	mux.Handle("/static/", noStoreHandler(http.StripPrefix("/static/", http.FileServer(http.FS(staticSub)))))
 
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -705,8 +710,20 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", 500)
 		return
 	}
+	// no-store so an app update is never served the previous index.html from the
+	// WebView cache (which would then load mismatched JS). See noStoreHandler.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
+}
+
+// noStoreHandler stops the in-app WebView from caching code assets across app
+// updates (stale JS + new HTML = blank screen). Cheap: the server is local.
+func noStoreHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) initFetcher() error {

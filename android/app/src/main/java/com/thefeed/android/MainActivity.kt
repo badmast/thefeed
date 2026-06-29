@@ -356,7 +356,11 @@ class MainActivity : ComponentActivity() {
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            cacheMode = WebSettings.LOAD_DEFAULT
+            // Never serve assets from the HTTP cache: the server is in-process
+            // (instant), and caching across app updates served STALE JS against a
+            // NEW index.html — a version mismatch that blanked the screen. This
+            // does NOT touch domStorage (localStorage), so settings persist.
+            cacheMode = WebSettings.LOAD_NO_CACHE
             allowFileAccess = false
             allowContentAccess = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW

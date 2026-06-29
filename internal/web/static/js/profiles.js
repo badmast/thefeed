@@ -220,8 +220,11 @@ function copyShareModalUri() {
 }
 
 
+var _switchingProfile = false;
 async function activateProfile(id) {
   if (id === activeProfileId) { closeProfiles(); return }
+  if (_switchingProfile) return; // ignore rapid repeat taps while a switch is already in flight
+  _switchingProfile = true;
   var skipCheck = true;
   try {
     var bankR = await fetch('/api/resolvers/bank');
@@ -234,7 +237,7 @@ async function activateProfile(id) {
   } catch (e) { }
   try {
     var r = await fetch('/api/profiles/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id, skipCheck: skipCheck }) });
-    if (!r.ok) return;
+    if (!r.ok) { _switchingProfile = false; return; }
     activeProfileId = id; selectedChannel = 0; channels = [];
     refreshingChannels = {};
     progressSilencedUntil = Date.now() + 5000;
@@ -260,6 +263,7 @@ async function activateProfile(id) {
       document.getElementById('messages').innerHTML = '<div class="empty-state"><p>' + (t('select_channel_hint') || '') + '</p></div>';
     }
   } catch (e) { }
+  _switchingProfile = false;
 }
 
 // ===== IMPORT URI =====

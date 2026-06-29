@@ -1857,7 +1857,9 @@
     .ptr-ind {
       position: absolute;
       left: 50%;
-      z-index: 4;
+      /* Above the floating sidebar header (z-index 7) so the spinner isn't
+         hidden behind it while pulling to refresh. */
+      z-index: 8;
       width: 30px;
       height: 30px;
       margin-left: -15px;

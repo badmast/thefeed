@@ -376,13 +376,21 @@ function setLastSeenTimestamp(name, ts) {
 
 // ===== RESCAN PROMPT =====
 // Resolves true → skip rescan. Honors scanPromptOff.
+// Single-instance: if a prompt is already open (e.g. the user tapped a profile
+// several times), return the SAME pending promise instead of stacking a new
+// overlay each time.
+var _rescanPromptPromise = null;
 function askRescan(count) {
-  return new Promise(function (resolve) {
-    if (localStorage.getItem('thefeed_scan_prompt_off') === '1') { resolve(true); return; }
-    if (!count || count <= 0) { resolve(true); return; }
+  if (localStorage.getItem('thefeed_scan_prompt_off') === '1') return Promise.resolve(true);
+  if (!count || count <= 0) return Promise.resolve(true);
+  if (_rescanPromptPromise) return _rescanPromptPromise;
+  _rescanPromptPromise = new Promise(function (resolve) {
     var msg = t('rescan_prompt_msg').replace('{n}', count);
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    // The floating nav sits at z-index 9300; the base .modal-overlay (100) would
+    // render this startup prompt underneath it. Lift it above the nav.
+    overlay.style.zIndex = '9600';
     overlay.innerHTML =
       '<div class="modal" style="max-width:380px">'
       + '<h2 style="margin-top:0">' + esc(t('rescan_prompt_title')) + '</h2>'
@@ -397,6 +405,7 @@ function askRescan(count) {
     document.body.appendChild(overlay);
     var done = function (skip) {
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      _rescanPromptPromise = null;
       resolve(skip);
     };
     document.getElementById('rescanPromptSkip').onclick = function () { done(true) };

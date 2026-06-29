@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import WebKit
 
 // UIKit application lifecycle (instead of the SwiftUI `App`/`WindowGroup`
 // scene lifecycle, which is iOS 14+). This hosts the SwiftUI ContentView
@@ -20,6 +21,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        // Drop the WebView's HTTP cache (NOT localStorage) so an app update can't
+        // load a STALE cached bundle from a previous version against the new
+        // index.html — a version mismatch that left a blank screen. The server is
+        // in-process, so refetching is instant. localStorage (settings, lang,
+        // saved port) lives in a different data type and is preserved.
+        let httpCacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: httpCacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)
+        ) { /* fire-and-forget; no-store headers keep it clean afterward */ }
+
         let root = ContentView().environmentObject(server)
         let host = UIHostingController(rootView: root)
         let win = UIWindow(frame: UIScreen.main.bounds)
