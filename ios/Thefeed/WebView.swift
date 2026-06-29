@@ -51,6 +51,10 @@ struct WebView: UIViewRepresentable {
             window.webkit.messageHandlers.thefeed.postMessage(
               { action: 'setLang', lang: l });
           },
+          setSystemBars: function(color, dark) {
+            window.webkit.messageHandlers.thefeed.postMessage(
+              { action: 'setSystemBars', color: color, dark: !!dark });
+          },
           saveMedia: function(b64, mime, name) {
             window.webkit.messageHandlers.thefeed.postMessage(
               { action: 'saveMedia', body: b64, mime: mime, name: name });

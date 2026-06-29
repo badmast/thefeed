@@ -3,18 +3,23 @@ import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var server: ServerController
+    // Follows the window's overrideUserInterfaceStyle, which the web theme drives
+    // via Bridge.setSystemBars — so the band recolors with the app.
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack {
-            // Background fills the notch + home-indicator area with the
-            // same color as the page so there's no visible band; the
-            // WebView itself stays *inside* the safe area so the page's
-            // CSS env(safe-area-inset-*) returns 0 and we don't end up
-            // double-padding (system inset + body padding).
+            // Background fills the notch + home-indicator area with the page's
+            // --bg2 so there's no visible band; the WebView itself stays *inside*
+            // the safe area so the page's CSS env(safe-area-inset-*) returns 0 and
+            // we don't double-pad (system inset + body padding). The color tracks
+            // light/dark so the bands aren't a fixed dark in light theme.
             //
             // Color(.sRGB, red:…) and edgesIgnoringSafeArea(.all) are the
             // iOS-13-compatible spellings of Color(red:…) / ignoresSafeArea().
-            Color(.sRGB, red: 0.07, green: 0.09, blue: 0.13, opacity: 1)
+            (colorScheme == .dark
+                ? Color(.sRGB, red: 14 / 255, green: 22 / 255, blue: 33 / 255, opacity: 1)    // --bg2 dark  #0e1621
+                : Color(.sRGB, red: 240 / 255, green: 242 / 255, blue: 245 / 255, opacity: 1)) // --bg2 light #f0f2f5
                 .fillSafeArea()
             if server.port > 0 {
                 WebView(url: URL(string: "http://127.0.0.1:\(server.port)")!)

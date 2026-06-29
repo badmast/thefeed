@@ -330,7 +330,22 @@ function resolveTheme(pref) {
   return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
 }
 function applyResolvedTheme() {
-  document.documentElement.setAttribute('data-theme', resolveTheme(themePref()));
+  var resolved = resolveTheme(themePref());
+  document.documentElement.setAttribute('data-theme', resolved);
+  syncNativeSystemBars(resolved);
+}
+// Recolor the native status + gesture/home-indicator bars to match the theme
+// (Android via Android.setSystemBars, iOS via IOS.setSystemBars). The web
+// <meta theme-color> only affects browser chrome, not a native WebView's
+// system bars, so the shell has to do it. No-op in a plain browser.
+function syncNativeSystemBars(resolved) {
+  try {
+    var bg = (getComputedStyle(document.documentElement).getPropertyValue('--bg2') || '').trim()
+      || (resolved === 'light' ? '#f0f2f5' : '#0e1621');
+    var dark = resolved === 'dark';
+    if (typeof Android !== 'undefined' && Android.setSystemBars) Android.setSystemBars(bg, dark);
+    else if (typeof IOS !== 'undefined' && IOS.setSystemBars) IOS.setSystemBars(bg, dark);
+  } catch (e) { }
 }
 var _themeMqlBound = false;
 function loadTheme() {

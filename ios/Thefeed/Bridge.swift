@@ -23,7 +23,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "shareMedia": share(body)
         case "openMedia": share(body)  // iOS treats open and share via the same picker
         case "setLang": setLang(body)
+        case "setSystemBars": setSystemBars(body)
         default: break
+        }
+    }
+
+    // MARK: - System bars (status bar + safe-area appearance)
+
+    // Force the window's appearance to the web theme so the status-bar icons and
+    // the SwiftUI safe-area fill (driven by @Environment(\.colorScheme)) both
+    // follow it — otherwise the notch / home-indicator bands stay dark in light
+    // theme. The WebView content keeps its own CSS theme; this is only chrome.
+    private func setSystemBars(_ body: [String: Any]) {
+        let dark = (body["dark"] as? Bool) ?? true
+        DispatchQueue.main.async { [weak self] in
+            let style: UIUserInterfaceStyle = dark ? .dark : .light
+            let window = self?.webView?.window
+                ?? UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+                ?? UIApplication.shared.windows.first
+            window?.overrideUserInterfaceStyle = style
         }
     }
 

@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -14,11 +15,13 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -31,6 +34,32 @@ class AndroidBridge(private val activity: Activity) {
 
     @JavascriptInterface
     fun isAndroid(): Boolean = true
+
+    // Recolor the status bar + gesture/navigation bar to match the web theme so
+    // they don't stay black against a light app. colorHex is the resolved
+    // --bg2; dark=true means the app is in dark theme (→ light bar icons).
+    @JavascriptInterface
+    fun setSystemBars(colorHex: String, dark: Boolean) {
+        activity.runOnUiThread {
+            val color = try {
+                Color.parseColor(colorHex.trim())
+            } catch (e: Exception) {
+                Color.parseColor(if (dark) "#0e1621" else "#f0f2f5")
+            }
+            val window = activity.window
+            @Suppress("DEPRECATION")
+            window.statusBarColor = color
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = color
+            // Fill the inset gaps behind the bars too (covers Android 15's
+            // enforced edge-to-edge, where the *BarColor setters are ignored).
+            activity.findViewById<View>(android.R.id.content)?.setBackgroundColor(color)
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            // Light bars (dark icons) in light theme; light icons in dark theme.
+            controller.isAppearanceLightStatusBars = !dark
+            controller.isAppearanceLightNavigationBars = !dark
+        }
+    }
 
     // ===== App lifecycle (back-button confirmation) =====
 
