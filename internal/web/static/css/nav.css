@@ -29,6 +29,19 @@
       z-index: 80;
     }
 
+    /* Catch taps in the strip BELOW the floating nav (the 10px + safe-area gap).
+       Without this, a channel scrolled into that gap behind the nav got tapped
+       by a finger reaching for the bar. Transparent, so the glass look (content
+       showing through around the bar) is preserved; it just absorbs the tap. */
+    .nav-bar::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      height: calc(12px + var(--safe-bottom));
+    }
+
     .nav-tab {
       flex: 1;
       display: flex;
@@ -173,6 +186,48 @@
       margin-top: -6px;
     }
 
+    /* Float the Feed/Mirror header (profile/add-channel + search) so the channel
+       list scrolls BEHIND it — transparent around the field pills, like the
+       content-pane topbars. Applies on BOTH mobile and desktop so the desktop
+       sidebar column doesn't show a solid header region behind the pills.
+       --feed-header-h is measured in JS so the list padding tracks the header
+       height (incl. the search collapse-on-scroll). */
+    .sidebar {
+      position: relative;
+    }
+    .sidebar-header {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 7;
+      background: transparent;
+      border-bottom: none;
+    }
+    #channelList,
+    #tmSidebar {
+      /* Clear the floating header. For Mirror we pad the whole #tmSidebar pane
+         (not just #tmChannelsList) so the disclaimer note — which sits ABOVE the
+         list — also drops below the header instead of hiding behind it. */
+      padding-top: calc(var(--feed-header-h, 104px) + 4px);
+    }
+
+    @media (max-width: 768px) {
+      /* The header's icon buttons become solid circles (like the messenger
+         composer's round buttons) so they read as discrete controls floating
+         over the list, with the rows visible in the gaps between them. */
+      .sidebar-header .icon-btn {
+        flex: 0 0 auto;
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: var(--surface);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+    }
+
     /* (Folder pills removed — Mirror is now its own bottom-nav tab.) */
 
     /* =====================================================================
@@ -308,8 +363,13 @@
 
     html.tm-open #tmSidebar {
       display: flex;
+      flex-direction: column;
       flex: 1;
       min-height: 0;
+      /* #tmSidebar is the single scroller (like the feed's #channelList): the
+         disclaimer note + channel list scroll together BEHIND the floating
+         header, instead of the list scrolling inside its own inner box. */
+      overflow-y: auto;
     }
 
     /* Mirror swaps the profile row for the Add-channel row in the same slot. */
@@ -395,6 +455,17 @@
       flex-direction: column;
       flex: 1;
       min-height: 0;
+    }
+
+    /* The messenger list header: a rounded floating capsule like the other
+       topbars, not a square full-width bar. Margin around it lets the page show
+       through the cut corners; translucent + no blur (weak-phone safe). */
+    html.chat-section #chatSidebar .chat-topbar {
+      margin: 8px 8px 2px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg2) 88%, transparent);
     }
 
     html.chat-section .chat-header,

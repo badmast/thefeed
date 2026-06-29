@@ -86,19 +86,7 @@
     var origLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = tmI18n('loading', 'Loading...'); }
 
-    // Anchor on the post the user is currently viewing (the oldest one shown,
-    // nearest the button) by its real on-screen offset — a scrollHeight delta is
-    // unreliable under content-visibility, which gives off-screen posts estimated
-    // heights. After prepending, put that same post back at the same offset; the
-    // newly-loaded older posts sit above it.
     var scroller = document.getElementById('tmContent');
-    var cur = window._tmCurrentPosts || [];
-    var anchorId = (cur[0] && cur[0].id || '').split('/').pop();
-    var anchorOffset = 0;
-    if (scroller && anchorId) {
-      var a0 = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
-      if (a0) anchorOffset = a0.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-    }
 
     fetch('/api/telemirror/older/' + encodeURIComponent(tmActive) + '?before=' + encodeURIComponent(beforeId))
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
@@ -115,15 +103,14 @@
           if (id) seen[id] = true;
           out.push(merged[i]);
         }
+        // Keep the current view fixed while older posts are prepended above it.
+        // With content-visibility gone, scrollHeight is real, so the prepended
+        // block's height = (new scrollHeight - old). Reading scrollHeight forces a
+        // synchronous reflow, so this is accurate the instant after the render.
+        var prevH = scroller ? scroller.scrollHeight : 0;
+        var prevTop = scroller ? scroller.scrollTop : 0;
         tmRenderPosts({ channel: window._tmCurrentChannel, posts: out, keepScroll: true });
-        if (!scroller || !anchorId) return;
-        requestAnimationFrame(function () {
-          var el = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
-          if (!el) return;
-          el.scrollIntoView();
-          var nowOffset = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-          scroller.scrollTop += (nowOffset - anchorOffset);
-        });
+        if (scroller) scroller.scrollTop = prevTop + (scroller.scrollHeight - prevH);
       })
       .catch(function () {
         if (btn) { btn.disabled = false; btn.textContent = origLabel; }
@@ -759,11 +746,10 @@
     }
     content.innerHTML = html;
     tmNeuterLinks(content);
-    // Jump to the newest (bottom) post. content-visibility gives off-screen
-    // posts estimated heights, so scrollHeight is unreliable — scrollIntoView on
-    // the last post force-renders it and lands accurately. Re-assert once to
-    // absorb the height growth as the newest posts' images load, unless the user
-    // has already scrolled. Skipped for "load older", which keeps its own anchor.
+    // Jump to the newest (bottom) post via scrollIntoView on the last post.
+    // Re-assert a couple of times to absorb the height growth as the newest
+    // posts' images finish loading, unless the user has already scrolled away.
+    // Skipped for "load older", which keeps its own anchor.
     if (!data.keepScroll) {
       requestAnimationFrame(function () {
         var p = content.querySelectorAll('.tm-post');
@@ -823,15 +809,24 @@
   // same HTML we already inject into the live DOM via tm-post-text.
   function tmPostPlainText(p) {
     if (!p.text) return '';
+    // Mark INTENTIONAL breaks (<br> / block ends) with a sentinel that survives
+    // the whitespace collapse below.
+    var BR = String.fromCharCode(1);
     var s = String(p.text)
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li)>/gi, '\n');
+      .replace(/<br\s*\/?>/gi, BR)
+      .replace(/<\/(p|div|li)>/gi, BR);
     var tmp = document.createElement('div');
     tmp.innerHTML = s;
     var raw = (tmp.textContent || tmp.innerText || '');
-    // Collapse HTML-source indentation: trim leading spaces per line,
-    // collapse 3+ consecutive newlines to 2.
-    raw = raw.replace(/^[ \t]+/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+    // The browser collapses source whitespace — including the newlines a channel
+    // puts between inline elements (e.g. one custom-emoji per source line) — to a
+    // single space when rendering; textContent does NOT. Collapse it ourselves so
+    // copy/save matches what's shown. Without this, emoji-heavy posts (e.g.
+    // SoftNetConnect's 🟩 rows) saved with one spurious line break per emoji.
+    // \s doesn't match the BR sentinel, so explicit breaks are preserved.
+    raw = raw.replace(/\s+/g, ' ');
+    raw = raw.split(BR).map(function (ln) { return ln.trim(); }).join('\n');
+    raw = raw.replace(/\n{3,}/g, '\n\n').trim();
     return raw;
   }
 

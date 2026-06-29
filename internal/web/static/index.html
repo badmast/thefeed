@@ -230,6 +230,14 @@
           <div class="chat-header-sub" id="chatSub"></div>
         </div>
         <div class="chat-header-actions">
+          <!-- Saved Messages actions live on the title bar (search toggle + lock);
+               shown only in saved view via .chat-header.sm-active (CSS). Icons +
+               titles populated by saved.js. -->
+          <div class="sm-header-actions" id="savedHeaderActions">
+            <button class="icon-btn" id="savedSearchToggle" onclick="toggleSavedSearch()"
+              data-i18n-title="search_saved" title="Search" data-icon="search"></button>
+            <button class="icon-btn" id="savedLockBtn" onclick="toggleSavedPassphrase()" title=""></button>
+          </div>
           <span class="next-fetch-label" id="nextFetchTimer"></span><span class="next-fetch-info" id="nextFetchInfoBtn"
             style="display:none" data-i18n-title="next_fetch_info" title="" onclick="showToast(t('next_fetch_info'))"
             tabindex="0" data-icon="info"></span>

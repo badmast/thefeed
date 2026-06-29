@@ -288,18 +288,30 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 @keyframes sm-slide-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 
 .sm-pinned {
+  /* Stays pinned just under the floating title bar while the list scrolls
+     behind it (Telegram-style), instead of scrolling away with the messages.
+     top:0 sticks it at the scroll's content-box edge (= the padding-top, just
+     below the title bar). */
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 16px;
+  gap: 9px;
+  padding: 7px 12px;
+  margin-bottom: 8px;
   flex-shrink: 0;
   cursor: pointer;
-  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
-  border-bottom: 1px solid color-mix(in oklab, var(--accent) 18%, transparent);
+  /* Compact rounded chip. Opaque (not accent-tinted) so messages don't bleed
+     through when it sticks; the accent lives on the pin icon + label only. */
+  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .22);
   transition: background 100ms;
   animation: sm-slide-in 200ms cubic-bezier(.4,0,.2,1);
 }
-.sm-pinned:hover { background: color-mix(in oklab, var(--accent) 11%, var(--surface)); }
+.sm-pinned:hover { background: var(--surface); }
 .sm-pinned-icon { color: var(--accent); flex-shrink: 0; line-height: 0; }
 .sm-pinned-icon svg { width: 14px; height: 14px; }
 .sm-pinned-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -326,18 +338,50 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-pinned-close:hover { color: var(--text); background: var(--hover); }
 .sm-pinned-close svg { width: 14px; height: 14px; }
 
-/* Search field + lock float below the title as TWO separate pills (no enclosing
-   bar) so the message list scrolls behind them and through the gap between. */
-.sm-search-bar {
-  position: absolute;
-  top: 70px;
-  inset-inline: 8px;
-  z-index: 5;
+/* Saved-view title-bar actions (search toggle + lock). While viewing Saved
+   (.chat-header.sm-active) they replace the feed's header actions. */
+.sm-header-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+/* The feed hides .chat-header-actions on mobile (bottom nav owns those); force
+   it back for the saved view so the search/lock buttons show. */
+.chat-header.sm-active .chat-header-actions {
+  display: flex !important;
+  align-items: center;
+}
+.chat-header.sm-active .chat-header-actions > :not(.sm-header-actions) {
+  display: none !important;
+}
+.chat-header.sm-active .sm-header-actions {
   display: flex;
+}
+.sm-header-actions .icon-btn.on {
+  color: var(--accent);
+}
+
+/* Search field floats just below the title bar — but ONLY when toggled open via
+   the title-bar search button (.sm-saved-root.sm-search-open). Hidden otherwise
+   so the saved view isn't a permanent search bar. The lock button moved to the
+   title bar. */
+.sm-search-bar {
+  display: none;
+  position: absolute;
+  top: 66px;
+  inset-inline: 8px;
+  z-index: 8;
   align-items: center;
   gap: 8px;
   background: none;
   pointer-events: none;
+}
+.sm-saved-root.sm-search-open .sm-search-bar {
+  display: flex;
+}
+/* While searching, drop the pinned chip so the field + results own the top. */
+.sm-saved-root.sm-search-open .sm-pinned {
+  display: none;
 }
 
 .sm-search-bar > * {
@@ -405,9 +449,9 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-scroll {
   flex: 1;
   overflow-y: auto;
-  /* Top clears the floating title + search pills; bottom clears the floating
-     composer so messages scroll behind both. */
-  padding: 132px 12px 78px;
+  /* Top clears only the floating title bar now (search is toggled, not
+     permanent); bottom clears the floating composer. */
+  padding: 66px 12px 78px;
   overscroll-behavior-y: contain;
 }
 .sm-scroll::-webkit-scrollbar { width: 4px; }

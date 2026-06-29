@@ -421,6 +421,23 @@ function wrapNav() {
   _wrapAfter('closeTelemirror', function () { setActiveTab('feed'); });
 }
 
+// The Feed/Mirror header floats over the channel list on mobile (see nav.css);
+// publish its live height as --feed-header-h so the list's padding-top tracks it
+// — including when the search row collapses on scroll and when Mirror swaps the
+// profile row for the add-channel row.
+function initFloatHeaderMetric() {
+  var hdr = document.querySelector('.sidebar-header');
+  if (!hdr) return;
+  var set = function () {
+    document.documentElement.style.setProperty('--feed-header-h', hdr.offsetHeight + 'px');
+  };
+  set();
+  if (typeof ResizeObserver === 'function') {
+    try { new ResizeObserver(set).observe(hdr); } catch (e) { }
+  }
+  window.addEventListener('resize', set);
+}
+
 (function navInit() {
   function go() {
     wrapNav();
@@ -429,6 +446,7 @@ function wrapNav() {
     initSidebarResize();
     initPullToRefresh();
     initSwipeNav();
+    initFloatHeaderMetric();
     watchChatBadge();
     syncChatBadge();
     setActiveTab('feed');

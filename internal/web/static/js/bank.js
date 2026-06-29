@@ -210,7 +210,12 @@ async function previewBankCleanup() {
     var r = await fetch('/api/resolvers/bank/cleanup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minScore: val, dryRun: true }) });
     if (!r.ok) return;
     var data = await r.json();
-    document.getElementById('bankCleanupPreview').innerHTML = '<span style="color:var(--error)">' + data.removed + '</span> ' + t('would_be_removed') + ', <span style="color:var(--success)">' + data.remaining + '</span> ' + t('would_remain');
+    // dir="auto" picks RTL from the Persian text (the pane is otherwise forced
+    // LTR, which pushed the leading count to the wrong side); <bdi> isolates the
+    // LTR numbers so they sit at their logical place in the sentence.
+    var prev = document.getElementById('bankCleanupPreview');
+    prev.dir = 'auto';
+    prev.innerHTML = '<bdi style="color:var(--error)">' + data.removed + '</bdi> ' + t('would_be_removed') + ', <bdi style="color:var(--success)">' + data.remaining + '</bdi> ' + t('would_remain');
   } catch (e) { }
 }
 async function doBankCleanup() {

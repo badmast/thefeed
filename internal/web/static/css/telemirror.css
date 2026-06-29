@@ -187,8 +187,10 @@
     }
 
     .tm-channels-list {
-      flex: 1;
-      overflow-y: auto;
+      /* Flows inside #tmSidebar (the scroller) rather than scrolling on its own,
+         so the list + disclaimer scroll together behind the floating header. */
+      flex: 0 0 auto;
+      overflow-y: visible;
       padding: 6px
     }
 
@@ -323,11 +325,11 @@
     }
 
     .tm-post {
-      /* Skip layout/paint of off-screen posts (keeps opening the feed fast).
-         Scroll-to-newest uses scrollIntoView on the last post, not scrollHeight,
-         since these estimated heights make scrollHeight unreliable. */
-      content-visibility: auto;
-      contain-intrinsic-size: auto 400px;
+      /* NO content-visibility here: its estimated off-screen heights
+         (contain-intrinsic-size) resolve asynchronously on Android WebView, which
+         broke every scroll anchor — load-older and reply-jump leapt several posts.
+         Real heights make scrollHeight reliable, so a simple anchor works. Images
+         stay lazy (loading="lazy"), so off-screen cost is still bounded. */
       /* Limited width (like the feed message box) but CENTERED — left-aligning
          a box of RTL (Persian) text left a lopsided gap that read as an indent. */
       max-width: min(85%, 600px);

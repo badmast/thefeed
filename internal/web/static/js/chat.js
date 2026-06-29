@@ -330,7 +330,16 @@ function chatViewportFit() {
   var m = document.getElementById('chatModal');
   if (!vv || !m) return;
   var kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+  // Note whether the thread was pinned to the bottom BEFORE we resize for the
+  // keyboard (measure first — the padding change alters clientHeight).
+  var body = document.getElementById('chatMsgsBody');
+  var wasAtBottom = body && (body.scrollHeight - body.scrollTop - body.clientHeight < 80);
   m.style.paddingBottom = kb ? ('calc(var(--safe-bottom) + ' + kb + 'px)') : '';
+  // Keyboard just opened while reading the latest messages → keep them visible
+  // instead of letting the shrunk viewport hide them behind the keyboard.
+  if (kb > 0 && wasAtBottom && body) {
+    requestAnimationFrame(function () { body.scrollTop = body.scrollHeight; });
+  }
 }
 
 // ---- new-message notification (foreground only) ----
@@ -670,8 +679,15 @@ function chatRenderIntro() {
 // rebuild the list/thread innerHTML while one is open — that would wipe the
 // popup and steal keyboard focus. Such a render is deferred (renderPending)
 // and flushed when the popup closes.
+//
+// Also covers the expanded recovery-code panel (#chatRecoveryBox): it lives
+// inside the rendered list, so a re-render triggered by an incoming message
+// would otherwise erase the recovery code while the user is reading it.
 function chatOverlayOpen() {
-  return !!document.querySelector('#chatModal .chat-sheet-overlay');
+  if (document.querySelector('#chatModal .chat-sheet-overlay')) return true;
+  var rec = document.getElementById('chatRecoveryBox');
+  if (rec && rec.style.display === 'block') return true;
+  return false;
 }
 
 // chatFlushPendingRender re-renders the current view if a render was deferred
@@ -878,7 +894,9 @@ window.chatForwardToSaved = chatForwardToSaved;
 async function chatShowRecovery() {
   var box = document.getElementById('chatRecoveryBox');
   if (!box) return;
-  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  // Closing it lifts the render guard — flush any list update that arrived
+  // (and was deferred) while the recovery code was on screen.
+  if (box.style.display === 'block') { box.style.display = 'none'; chatFlushPendingRender(); return; }
   try {
     var r = await fetch('/api/chat/seed');
     var d = await r.json();
@@ -897,6 +915,10 @@ async function chatShowRecovery() {
 async function chatMarkBackedUp() {
   await fetch('/api/chat/seed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'backedup' }) });
   if (chatState.info) chatState.info.backedUp = true;
+  // Collapse the recovery panel first so the list re-render isn't blocked by the
+  // open-overlay guard (chatOverlayOpen treats the visible box as an overlay).
+  var box = document.getElementById('chatRecoveryBox');
+  if (box) box.style.display = 'none';
   chatRenderList();
 }
 
@@ -1586,7 +1608,14 @@ async function chatRenderThread() {
   }
   chatInputResize();
   chatUpdateCountdown();
-  if (inp && !liveFooter && (firstRender || (hadFocus && !keepScroll))) {
+  // Auto-focus the compose box on first open only on DESKTOP. On mobile that
+  // popped the keyboard immediately, which shrank the viewport and pushed the
+  // newest messages (just scrolled into view) back under the keyboard. Like
+  // Telegram, mobile waits for the user to tap the box. Focus is still preserved
+  // across the periodic re-renders (hadFocus) so typing isn't interrupted.
+  var isMobile = (typeof mobileQuery !== 'undefined' && mobileQuery.matches);
+  var allowFirstFocus = firstRender && !isMobile;
+  if (inp && !liveFooter && (allowFirstFocus || (hadFocus && !keepScroll))) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
   if (inp && !liveFooter) inp.addEventListener('blur', chatFlushPendingRender);

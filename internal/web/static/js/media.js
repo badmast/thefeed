@@ -787,40 +787,22 @@ window.handleAndroidBack = async function () {
   var openModal = document.querySelector('.modal-overlay.active');
   if (openModal) { openModal.classList.remove('active'); return; }
 
-  // --- reparented shell sections (state lives on <html>, not in modals) ---
-  // Mirror: open channel → channel list; the list itself → feed.
-  if (de.classList.contains('tm-channel')) {
-    if (typeof toggleTmSidebar === 'function') toggleTmSidebar();
-    return;
-  }
-  // Chat: open thread → conversation list; the list itself → feed. (Check
-  // chat-thread before chat-section — both are set while a thread is open.)
-  if (de.classList.contains('chat-thread')) {
-    if (typeof chatBackToList === 'function') chatBackToList();
-    else if (typeof closeMessenger === 'function') closeMessenger();
-    return;
-  }
-  if (de.classList.contains('tm-open')) {
-    if (typeof closeTelemirror === 'function') closeTelemirror();
-    return;
-  }
-  if (de.classList.contains('chat-section')) {
-    if (typeof closeMessenger === 'function') closeMessenger();
-    return;
-  }
-  if (de.classList.contains('resolver-section')) {
-    if (typeof closeResolverSection === 'function') closeResolverSection();
-    return;
-  }
-  if (de.classList.contains('settings-section')) {
-    if (typeof closeSettingsSection === 'function') closeSettingsSection();
-    return;
-  }
-
-  // Feed: an open channel conversation → channel list (also handles Saved).
-  if (mobileQuery.matches && app && app.classList.contains('chat-open')) {
-    if (typeof feedBack === 'function') feedBack();
-    else openSidebar();
+  // --- in-app sections + feed channel ---
+  // Each section (Mirror/Chat/Resolver/Settings) and the feed channel view
+  // pushes a history entry per layer (section → sub-view), and each owns a
+  // popstate handler that unwinds exactly ONE layer the right way
+  // (sub-view → sidebar → feed). So just step history back and let those run —
+  // the same path desktop/iOS take. Calling the section-close helpers directly
+  // (the old approach) skipped the sidebar step and jumped straight to the feed.
+  var inSection =
+    de.classList.contains('tm-open') ||
+    de.classList.contains('chat-section') ||
+    de.classList.contains('resolver-section') ||
+    de.classList.contains('settings-section') ||
+    (typeof mobileQuery !== 'undefined' && mobileQuery.matches &&
+      app && app.classList.contains('chat-open'));
+  if (inSection) {
+    try { history.back(); } catch (e) { }
     return;
   }
 
