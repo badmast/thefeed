@@ -788,6 +788,11 @@ window.handleAndroidBack = async function () {
   var chatSheet = document.querySelector('.chat-sheet-overlay');
   if (chatSheet && chatSheet.parentNode) { chatSheet.parentNode.removeChild(chatSheet); return; }
 
+  // Link sheets (feed + mirror "open this link?"). Own overlay classes, not
+  // .modal-overlay, so they need their own back-button hook.
+  var linkSheet = document.getElementById('linkSheetOverlay') || document.getElementById('tmLinkSheet');
+  if (linkSheet && linkSheet.parentNode) { linkSheet.parentNode.removeChild(linkSheet); return; }
+
   // Any open modal dialog (profiles, link sheet, info dialog, close-confirm…).
   var openModal = document.querySelector('.modal-overlay.active');
   if (openModal) { openModal.classList.remove('active'); return; }

@@ -622,6 +622,7 @@ function showLinkSheet(url, extra) {
   overlay.id = 'linkSheetOverlay';
   overlay.className = 'link-overlay';
   overlay.innerHTML = '<div class="link-sheet">'
+    + '<button class="link-sheet-close" type="button" aria-label="' + escAttr(t('close') || 'Close') + '">' + icon('x') + '</button>'
     + '<div class="link-title">' + esc(t('telemirror_open_this_link') || 'Open this link?') + '</div>'
     + '<div class="link-url" dir="ltr">' + esc(url) + '</div>'
     + '<div class="link-actions">'
@@ -633,6 +634,10 @@ function showLinkSheet(url, extra) {
   overlay.addEventListener('click', function (e) {
     if (e.target === overlay) overlay.remove();
   });
+  // Direct handler, NOT target-class matching on the overlay: a real click
+  // lands on the svg INSIDE the button, so e.target never carries the
+  // button's class (element.click() in tests masks this).
+  overlay.querySelector('.link-sheet-close').onclick = function () { overlay.remove(); };
   if (extra) {
     overlay.querySelector('.link-goto').onclick = function () {
       overlay.remove();

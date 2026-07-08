@@ -1360,6 +1360,7 @@
     overlay.id = 'tmLinkSheet';
     overlay.className = 'tm-link-overlay';
     var html = '<div class="tm-link-sheet">'
+      + '<button class="tm-link-close" type="button" aria-label="' + tmEsc(tmI18n('close', 'Close')) + '">' + window.icon('x') + '</button>'
       + '<div class="tm-link-title">' + tmEsc(tmI18n('telemirror_open_this_link', 'Open this link?')) + '</div>'
       + '<div class="tm-link-url" dir="ltr">' + tmEsc(url) + '</div>'
       + '<div class="tm-link-actions">'
@@ -1378,6 +1379,9 @@
     overlay.addEventListener('click', function (e) {
       if (e.target === overlay) overlay.remove();
     });
+    // Direct handler — a real click targets the svg inside the button, so
+    // target-class matching on the overlay never fires (see core.js note).
+    overlay.querySelector('.tm-link-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('.tm-link-copy').onclick = function () {
       try {
         if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
